@@ -7,9 +7,9 @@ to Isaac Sim as one `sensor_msgs/JointState` (`/dual_arm/isaac_joint_commands`);
 
 ```
 Motive (Windows) --NatNet--> mocap4r2 OptiTrack driver --/rigid_bodies-->
-  mocap_tf --TF map->rigid_body_1, rigid_body_2-->
-    teleop  (rigid_body_1: filter -> IK -> speed limit)   -> arm_<side>_joint1..6
-    gripper (|rigid_body_2 - rigid_body_1| < threshold)   -> XEG-32 open / close
+  mocap_tf --TF: one frame per Motive streaming ID-->
+    teleop  (hand ID 1: filter -> IK -> speed limit)      -> arm_<side>_joint1..6
+    gripper (|fingertip ID 2 - hand ID 1| < threshold)    -> XEG-32 open / close
     joint_merger (all arms + grippers in ONE message)
   --> /dual_arm/isaac_joint_commands -> Isaac Sim (rig bridge scripts)
   /dual_arm/isaac_joint_states (from Isaac) -> robot_state_publisher -> RViz
@@ -19,7 +19,7 @@ Motive (Windows) --NatNet--> mocap4r2 OptiTrack driver --/rigid_bodies-->
 ```
 rebel_demo/
   rebel_demo/kinematics.py     rebel2 joint table (= igus_rebel2_arm_macro.xacro), FK, IK (damped least squares)
-  rebel_demo/mocap_tf_node.py  node "mocap_tf": mocap4r2 /rigid_bodies -> TF (map -> rigid_body_<id>)
+  rebel_demo/mocap_tf_node.py  node "mocap_tf": mocap4r2 /rigid_bodies -> TF (one TF frame per Motive streaming ID)
   rebel_demo/teleop_node.py    node "teleop":   hand TF -> low-pass -> clutch/scale -> IK -> speed limit -> JointState
   rebel_demo/gripper_node.py   node "gripper":  distance between two rigid bodies -> XEG-32 open (1) / closed (0)
   rebel_demo/joint_merger_node.py  node "joint_merger": all arm / gripper commands -> ONE JointState per cycle
@@ -83,16 +83,17 @@ Edit -> Settings -> Streaming: **Broadcast Frame Data** on, **Local Interface** 
 network, **Transmission Type** = same as the YAML, **Rigid Bodies** on. Windows firewall: network profile Private,
 allow Motive.
 
-Rigid bodies: each one's **Streaming ID** (Properties -> Streaming ID) becomes the TF frame `rigid_body_<ID>`;
-the name you give it in Motive does not matter. Defaults used by the launch file:
+Rigid bodies: all you need from Motive is each body's **Streaming ID** (Properties -> Streaming ID). You pass that number to
+the launch arguments; the name you give the body in Motive does not matter. Defaults used by the launch file:
 
-| rigid body | Streaming ID | TF frame | launch argument |
-|---|---|---|---|
-| palm (moves the arm) | 1 | `rigid_body_1` | `hand_frame` |
-| fingertip (opens / closes the gripper) | 2 | `rigid_body_2` | `gripper_frame` |
+| rigid body | Streaming ID | launch argument |
+|---|---|---|
+| palm (moves the arm) | 1 | `hand_frame:=1` |
+| fingertip (opens / closes the gripper) | 2 | `gripper_frame:=2` |
 
-Other IDs: pass just the number, e.g. `hand_frame:=5 gripper_frame:=6` (the full TF name `rigid_body_5` also works). The `mocap_tf` log prints
-`new rigid body: map -> rigid_body_<ID>` for every rigid body it receives.
+Other IDs: just pass the number, e.g. `hand_frame:=5 gripper_frame:=6`. (Internally the ID becomes the TF frame
+`rigid_body_<ID>`, which you only need to know for debugging with `tf2_echo`; passing the full name also works.) The `mocap_tf`
+log prints `new rigid body: map -> rigid_body_<ID>` for every rigid body it receives.
 
 ## 3. Build this package
 Get the code into the workspace `src` folder (the clone creates `src/rebel_mocap_teleop/`; the ROS package inside it is
@@ -189,7 +190,7 @@ ros2 launch mocap4r2_optitrack_driver optitrack2.launch.py
 # terminal 2: activate, check data (~120 Hz)
 ros2 lifecycle set /mocap4r2_optitrack_driver_node activate
 ros2 topic hz /rigid_bodies
-# terminal 3, RViz only, no Isaac (palm = rigid_body_1, fingertip = rigid_body_2)
+# terminal 3, RViz only, no Isaac (palm = streaming ID 1, fingertip = ID 2)
 #   (add rviz:=false over SSH, then run RViz elsewhere)
 ros2 launch rebel_demo teleop.launch.py target:=rviz rig:=left hand_frame:=1 scale:=0.5 \
   gripper_frame:=2 gripper_threshold:=0.08 gripper_hysteresis:=0.02 mesh_lod:=low
@@ -239,7 +240,7 @@ Check the commands: `ros2 topic echo /dual_arm/isaac_joint_commands` (Isaac mode
 RViz on another machine: `rviz2 -d $(ros2 pkg prefix rebel_demo)/share/rebel_demo/rviz/rebel_demo.rviz`
 
 ## How teleop works (every cycle, 60 Hz)
-1. Read the hand pose from TF (`arm_left_base_link <- rigid_body_1`).
+1. Read the hand pose from TF (hand body, e.g. ID 1 = TF frame `rigid_body_1`, in the frame `arm_left_base_link`).
 2. Tracking check: no update or a frozen pose for 0.2 s -> hold. A single-sample jump faster than a hand can move (`max_hand_speed`, 2 m/s) is a marker glitch and is skipped (accepted if it persists 0.1 s). Gaps under 2 s (`reanchor_after`) keep the anchor and the tool catches up at most at `max_tool_speed` (0.5 m/s); after a longer loss the clutch re-anchors when tracking returns (no jumps). TF is received in its own thread, so the IK never delays it.
 3. Low-pass filter on the hand pose (position: first order; orientation: slerp). Filtering before IK keeps marker jitter out of the joints.
 4. Clutch mapping: target = robot pose at engage + scale_trans x (hand now - hand at engage) (and, with `orientation:=true`, rotated by `scale_rot` x the hand's rotation since engage); clamped to a workspace box (in the arm base frame, x/y +-0.7 m, z -0.45..0.95 m) that is widened to include the pose at engage, so engaging never moves the arm.
@@ -251,7 +252,7 @@ RViz on another machine: `rviz2 -d $(ros2 pkg prefix rebel_demo)/share/rebel_dem
 | argument | default | meaning |
 |---|---|---|
 | target | rviz | `rviz`: no Isaac, `joint_merger` publishes the rig's joint states; `isaac`: Isaac publishes them and gets the commands |
-| hand_frame | 1 | Motive **streaming ID** of the hand's rigid body (`rig:=left` / `right`). `2` and `rigid_body_2` are the same; the TF frame is `rigid_body_<ID>` |
+| hand_frame | 1 | Motive **streaming ID** of the hand's rigid body (`rig:=left` / `right`) |
 | scale_trans | 1.0 | hand-to-robot **translation** ratio (0.5 = finer). `scale` is the old name and still works as an alias; `scale_trans` wins if both are given |
 | scale_rot | 1.0 | hand-to-robot **rotation** ratio: with `orientation:=true` the wrist turns by `scale_rot` x your hand rotation since engage; with `orientation:=semi` joint 6 turns by `scale_rot` x your hand roll; unused with `orientation:=false` |
 | orientation | false | `false` position only (wrist free; joint 6 never moves) · `true` follow the full hand rotation (swings joints 4/6 near the straight-up singularity) · `semi` position only **plus joint 6 follows your hand's roll** about the tool axis (see below) |
@@ -259,10 +260,12 @@ RViz on another machine: `rviz2 -d $(ros2 pkg prefix rebel_demo)/share/rebel_dem
 | roll_sign | 1.0 | `orientation:=semi`: `-1` flips the joint 6 direction (the roll gain is `scale_rot`) |
 | cutoff_hz | 4.0 | filter cutoff; lower = smoother but more lag |
 | max_joint_speed_deg | 45 | per-joint speed limit after IK |
+| skip_home | false | `true`: no start-up move to `home_deg`; teleop starts from the measured joints (all zeros if none arrive) and `engage` works at once. For a robot that already is at the pose you want |
 | workspace_min / workspace_max | -0.7 -0.7 -0.45 / 0.7 0.7 0.95 | IK target clamp x y z in the arm base frame [m]; widened to include the pose at engage; a warning names the bound that clamps |
 | limit_warn_mm | 5 | warn `joint limit reached` when the IK is this far [mm] off the target and a joint is at a limit |
 | robot_xyz / robot_ypr | 0 0 0 | robot base pose in the mocap `map` frame (m, rad) |
 | mocap_bridge | true | start the `mocap_tf` converter (`false` = no mocap needed) |
+| mocap_frame | map | name of the mocap world frame that `robot_xyz` / `robot_ypr` are given in |
 | rviz | true | start RViz here (needs a display) |
 | mesh_lod | low | `low` (decimated meshes) or `full` (CAD) |
 | lock_gripper | false | true = XEG joints fixed in the model (no gripper joints in RViz or commands) |
@@ -283,7 +286,7 @@ RViz on another machine: `rviz2 -d $(ros2 pkg prefix rebel_demo)/share/rebel_dem
 | command_topic | (auto) | `/dual_arm/isaac_joint_commands`; must match Isaac's ROS2 Subscribe Joint State node exactly |
 
 ## Gripper (HIWIN XEG-32)
-Two rigid bodies on the same hand: the **palm** (`rigid_body_1`, moves the arm) and a **fingertip** (`rigid_body_2`,
+Two rigid bodies on the same hand: the **palm** (streaming ID 1, moves the arm) and a **fingertip** (ID 2,
 Motive Streaming ID 2, controls the gripper). Finger extended = far = **open**, finger curled = near = **closed**.
 Moving or rotating the whole hand does not change their distance, so arm motion never opens or closes the gripper.
 The node measures the distance between the two rigid bodies' pivot points and switches between two states:
@@ -300,6 +303,7 @@ opens above 9 cm); typical palm -> index fingertip distances are ~10-13 cm exten
 Calibrate: print the distance live, hold the finger extended, then curled, and set `gripper_threshold` to the
 midpoint and `gripper_hysteresis` to about a third of the difference:
 ```bash
+# tf2_echo needs the TF frame names rigid_body_<ID> (here the bodies with streaming IDs 1 and 2)
 stdbuf -oL ros2 run tf2_ros tf2_echo rigid_body_1 rigid_body_2 2>/dev/null | awk '/Translation/ {gsub(/[\[\],]/,""); printf "%.1f cm\n", 100*sqrt($3*$3+$4*$4+$5*$5)}'
 ros2 topic echo /rebel_gripper/state     # (rig:=both: /rebel_gripper_left/state) 1 = open, 0 = closed (the launch log also prints OPEN / CLOSE + distance)
 ```
@@ -308,7 +312,7 @@ pad are hidden when you curl, and when tracking is lost the gripper keeps its la
 Use clearly different marker patterns for palm and fingertip.
 ### Orientation mode (`gripper_mode:=orientation`)
 Instead of the distance, the gripper follows how much the fingertip body is **rotated relative to the palm body**.
-Positions are ignored. The relative rotation (`rigid_body_1 <- rigid_body_2`) does not change when you turn the
+Positions are ignored. The relative rotation (fingertip body seen from the palm body) does not change when you turn the
 whole hand, so it works facing up, down, left or right. The node takes the total rotation angle (0-180 deg):
 ```
 angle < gripper_open_angle   (30)   -> OPEN   (same orientation as the calibrated open pose)
@@ -322,6 +326,9 @@ ros2 launch rebel_demo teleop.launch.py rig:=left target:=isaac hand_frame:=1 \
   gripper_frame:=2 gripper_mode:=orientation rviz:=false
 ros2 service call /rebel_gripper/calibrate std_srvs/srv/Trigger
 ros2 topic echo /rebel_gripper/angle_deg     # tune gripper_open_angle / gripper_close_angle with this
+# rig:=both: one call per hand (or `scripts/run.sh calibrate`), node names /rebel_gripper_left and /rebel_gripper_right:
+#   ros2 service call /rebel_gripper_left/calibrate std_srvs/srv/Trigger
+#   ros2 service call /rebel_gripper_right/calibrate std_srvs/srv/Trigger
 ```
 The angle includes any rotation (twist or tilt about any axis) between the two bodies, so keep the two bodies
 rigidly fixed to your hand and only flip the finger body to close. The 0.1 s debounce applies here too.
@@ -335,7 +342,7 @@ In Isaac's Script Editor (stage loaded, timeline **stopped**), run the rig's thr
 `path_base` to where the scripts are:
 ```python
 scripts = ["dual_arm_rig_ros2_bridge.py", "sim_flap_weld.py", "sim_scene_control.py"]
-path_base = "/home/<you>/rebel_ws/src/igus_rebel_description/urdf/igus_stand_dual_arm/"   # absolute path, no "~"
+path_base = "/home/<you>/dual_arm_control/src/igus_rebel_description/urdf/igus_stand_dual_arm/"   # absolute path, no "~"
 for script in scripts:
     with open(path_base + script) as f:
         exec(f.read())
