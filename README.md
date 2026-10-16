@@ -222,7 +222,7 @@ to move it ([section 12](#12-testing-without-hardware)). Over SSH add `rviz:=fal
 | rviz / mesh_lod / lock_gripper | true / low / false | start RViz here (needs a display) / `low` decimated or `full` CAD meshes / fix the XEG joints in the model |
 | **mocap** | | |
 | hand_frame, gripper_frame | 1, 2 | `rig:=left/right`: Motive streaming IDs of the hand and the gripper-control body |
-| gripper_ref_frame | (hand) | streaming ID the gripper distance is measured to |
+| gripper_ref_frame | (= `hand_frame`) | `rig:=left/right` only: streaming ID of the body the fingertip is compared with (distance in `distance` mode, relative rotation in `orientation` mode). Empty = the hand / palm body, which is what you want normally; with `rig:=both` it is always each side's own hand |
 | left_hand_frame, left_gripper_frame | 1, 2 | `rig:=both`: streaming IDs of the left palm / fingertip |
 | right_hand_frame, right_gripper_frame | 3, 4 | `rig:=both`: streaming IDs of the right palm / fingertip |
 | mocap_bridge | true | start `mocap_tf` (`/rigid_bodies` -> TF); `false` = no mocap needed |
