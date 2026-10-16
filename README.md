@@ -183,12 +183,11 @@ resumes all; `l` / `r` toggle only the left / right arm; `q` quits. Pausing rele
 reposition your hand, and on resume the robot's last pose and your hand's pose at that moment are the new reference (hand
 motion during the pause is ignored). The gripper is not affected. `/rebel_teleop*/engaged` (latched) shows the state.
 
-The keyboard calls the teleop services; you only need them to **go back to home** (no key for it), to set an explicit state,
-or without a keyboard (SSH, scripts). Node names `/rebel_teleop_left`, `_right`, or `/rebel_teleop` for one arm:
+The keyboard has no key for going **back to `home_deg`** (this also disengages); use the service (`/rebel_teleop_left`,
+`/rebel_teleop_right`, or `/rebel_teleop` for one arm). The other services (`engage`, `toggle`) are listed in
+[section 8](#8-nodes-topics-and-services) for scripts and for use without a keyboard.
 ```bash
-ros2 service call /rebel_teleop_left/home   std_srvs/srv/Trigger                 # back to home_deg (disengages)
-ros2 service call /rebel_teleop_left/engage std_srvs/srv/SetBool "{data: true}"  # explicit state; {data: false} releases the clutch
-ros2 service call /rebel_teleop_left/toggle std_srvs/srv/Trigger                 # pause <-> resume
+ros2 service call /rebel_teleop_left/home std_srvs/srv/Trigger
 ```
 
 ### 2.5 Align the robot with how you stand
