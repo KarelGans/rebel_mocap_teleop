@@ -122,9 +122,10 @@ use `run.sh` or a small script you source on demand.
 ---
 
 ## 2. Run
-Naming: with `rig:=left` (default) or `right` the nodes are `/rebel_teleop` and `/rebel_gripper`; with `rig:=both` they are
-`/rebel_teleop_left`, `/rebel_teleop_right`, `/rebel_gripper_left`, `/rebel_gripper_right`. The frame arguments take the
-Motive streaming ID (`left_hand_frame:=2`; the full TF name `rigid_body_2` also works).
+`rig` defaults to `both` (two arms, two hands). Nodes: `/rebel_teleop_left`, `/rebel_teleop_right`, `/rebel_gripper_left`,
+`/rebel_gripper_right`; with `rig:=left` or `right` (one arm, the other holds its pose) they are `/rebel_teleop` and `/rebel_gripper`.
+The frame arguments always come per side and take the Motive streaming ID (`left_hand_frame:=2`; the full TF name
+`rigid_body_2` also works): the left arm uses `left_hand_frame` / `left_gripper_frame`, the right arm `right_*`.
 
 ### 2.1 Driver
 ```bash
@@ -150,7 +151,7 @@ ros2 launch rebel_demo teleop.launch.py target:=isaac rig:=both rviz:=false scal
   joint feedback teleop assumes zeros and ramps from there. If it already is at the pose you want, drop `home_deg` and add `skip_home:=true`.
 - `robot_ypr` turns the robot frame to match how you stand ([2.5](#25-align-the-robot-with-how-you-stand)).
 - Keep the whole command on one logical line (`\` at the line ends) and quote values that contain spaces.
-- Single arm: `rig:=left hand_frame:=1 gripper_frame:=2` (and no `left_*` / `right_*` arguments).
+- Single arm: `rig:=left` (uses `left_hand_frame` / `left_gripper_frame`) or `rig:=right` (uses `right_*`); drop the other side's arguments.
 
 ### 2.3 Isaac Sim
 In Isaac's Script Editor (stage loaded, timeline **stopped**) run the rig's three scripts, then press **Play**. Isaac must be
@@ -213,7 +214,7 @@ to move it ([section 12](#12-testing-without-hardware)). Over SSH add `rviz:=fal
 |---|---|---|
 | **mode / setup** | | |
 | target | rviz | `rviz`: no Isaac, `joint_merger` publishes the rig's joint states (RViz shows the arm). `isaac`: publish the commands on `command_topic` and expect the joint states from outside (Isaac, your driver, or `fake_state`); also the setting for a real robot |
-| rig | left | `left` / `right`: that arm of the dual-arm rig, the other holds its pose. `both`: both arms, two hands |
+| rig | both | `both`: both arms, two hands. `left` / `right`: only that arm of the dual-arm rig, the other holds its pose; it uses that side's `left_*` / `right_*` frame arguments |
 | use_sim_time | (auto) | `true` with `target:=isaac` (Isaac's `/clock`), else `false`. Real robot: `false` |
 | fake_state | false | `target:=isaac` only: publish `/dual_arm/isaac_joint_states` from the commanded joints (others 0). For a robot or setup with no state publisher; never together with Isaac |
 | command_topic | `/dual_arm/isaac_joint_commands` | output topic; must match Isaac's ROS2 Subscribe Joint State node |
@@ -221,9 +222,8 @@ to move it ([section 12](#12-testing-without-hardware)). Over SSH add `rviz:=fal
 | rig_xacro | dual_arm_rig_v2.urdf.xacro | rig model in `igus_rebel_description/urdf` (`dual_arm_rig.urdf.xacro` for the v1 rig) |
 | rviz / mesh_lod / lock_gripper | true / low / false | start RViz here (needs a display) / `low` decimated or `full` CAD meshes / fix the XEG joints in the model |
 | **mocap** | | |
-| hand_frame, gripper_frame | 1, 2 | `rig:=left/right`: Motive streaming IDs of the hand and the gripper-control body |
-| left_hand_frame, left_gripper_frame | 1, 2 | `rig:=both`: streaming IDs of the left palm / fingertip |
-| right_hand_frame, right_gripper_frame | 3, 4 | `rig:=both`: streaming IDs of the right palm / fingertip |
+| left_hand_frame, left_gripper_frame | 1, 2 | Motive streaming IDs of the left palm (moves the arm) / fingertip (gripper); used by `rig:=left` and `both` |
+| right_hand_frame, right_gripper_frame | 3, 4 | the same for the right hand; used by `rig:=right` and `both` |
 | mocap_bridge | true | start `mocap_tf` (`/rigid_bodies` -> TF); `false` = no mocap needed |
 | mocap_frame | map | name of the mocap world frame |
 | robot_xyz, robot_ypr | `0 0 0`, `0 0 0` | pose of the robot frame in the mocap frame (m; yaw pitch roll, rad). Only the rotation matters |
@@ -385,27 +385,27 @@ at HOME and moves each palm in its arm's own axes (hold, 10 cm down, 15 cm forwa
 Run these from `~/dual_arm_control/src/rebel_mocap_teleop/tools/`; **one command per terminal**, no mocap driver needed
 (`mocap_bridge:=false`) unless noted:
 ```bash
-# a) RViz only, one arm                                   b) RViz only, both arms
+# a) RViz only, both arms (rig:=both is the default)
 ros2 launch rebel_demo teleop.launch.py target:=rviz mocap_bridge:=false              # terminal 1
-python3 fake_hand.py                                                                   # terminal 2
-#    (both arms: add rig:=both to the launch and --arm both --loop to fake_hand.py)
+python3 fake_hand.py --loop                                                            # terminal 2
+#    one arm: add rig:=left (or right) to the launch and --arm left (or right) to fake_hand.py
 
 # c) the full Isaac interface with the fake Isaac (for real Isaac, leave fake_isaac.py out)
 python3 fake_isaac.py                                                                  # terminal 1
-ros2 launch rebel_demo teleop.launch.py target:=isaac rig:=both mocap_bridge:=false   # terminal 2
-python3 fake_hand.py --arm both --sim-time --loop                                      # terminal 3 (--sim-time is required with Isaac's clock)
+ros2 launch rebel_demo teleop.launch.py target:=isaac mocap_bridge:=false             # terminal 2
+python3 fake_hand.py --sim-time --loop                                                 # terminal 3 (--sim-time is required with Isaac's clock)
 
 # d) real-robot-like setup, no Isaac and no mocap
-ros2 launch rebel_demo teleop.launch.py target:=isaac rig:=both mocap_bridge:=false use_sim_time:=false fake_state:=true   # terminal 1
-python3 fake_hand.py --arm both --loop                                                 # terminal 2
+ros2 launch rebel_demo teleop.launch.py target:=isaac mocap_bridge:=false use_sim_time:=false fake_state:=true   # terminal 1
+python3 fake_hand.py --loop                                                 # terminal 2
 
 # e) through the mocap converter too: fake_hand publishes /rigid_bodies like the driver (mocap4r2_msgs sourced, mocap_bridge on)
-ros2 launch rebel_demo teleop.launch.py target:=rviz rig:=both                        # terminal 1
-python3 fake_hand.py --arm both --pattern cross --output rigid_bodies --loop           # terminal 2
+ros2 launch rebel_demo teleop.launch.py target:=rviz                                  # terminal 1
+python3 fake_hand.py --pattern cross --output rigid_bodies --loop           # terminal 2
 ```
-Options of `fake_hand.py`: `--arm left|right|both`, `--pattern reach|cross` (`cross`: up, back, down, back, left, back, right, back,
+Options of `fake_hand.py`: `--arm both` (default) `|left|right`, `--pattern reach|cross` (`cross`: up, back, down, back, left, back, right, back,
 each `--amp` 0.10 m, gripper open), `--output tf|rigid_bodies`, `--loop`, `--down` / `--forward` (m), `--seg` (s per move),
-`--sim-time`, `--service`, `--palm` / `--finger` (streaming IDs, single arm), `--rotate-finger` (close by rotating the
+`--sim-time`, `--service`, `--palm` / `--finger` (streaming IDs; single arm, default 1/2 for left and 3/4 for right), `--rotate-finger` (close by rotating the
 fingertip body, for `gripper_mode:=orientation`), and `--unstable` (2 mm jitter, drop-outs, frozen frames, marker glitches; or
 `--noise`, `--jitter`, `--dropouts`, `--freezes`, `--outliers`, `--seed`).
 

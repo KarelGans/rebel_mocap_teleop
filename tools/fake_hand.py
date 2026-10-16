@@ -6,8 +6,9 @@ Publishes TF  map -> palm / fingertip rigid bodies (like mocap_tf does for real 
 works wherever the arm is mounted): hold, down, forward, back, up. The fingertip stays 10 cm from the palm (gripper
 open), then curls to 5 cm during the 'forward' part (gripper closes) and opens again at the end.
 
-  --arm left | right | both     both: left hand = rigid_body_1/2, right hand = rigid_body_3/4 (the rig:=both defaults),
-                                the right hand runs half a cycle behind so the arms visibly move independently
+  --arm both (default) | left | right
+                                left hand = streaming IDs 1/2, right hand = 3/4 (the launch defaults, also for rig:=left / right);
+                                with both, the right hand runs half a cycle behind so the arms visibly move independently
   --pattern reach | cross       reach (default): hold, down, forward (gripper closes), back, up (gripper opens)
                                 cross: hold, up, back, down, back, left, back, right, back (--amp, gripper stays open)
   --output tf | rigid_bodies    tf (default): TF map -> rigid_body_<id>, as mocap_tf would publish it
@@ -22,11 +23,11 @@ open), then curls to 5 cm during the 'forward' part (gripper closes) and opens a
   --rotate-finger               close the gripper by turning the fingertip body 150 deg (gripper_mode:=orientation)
   --sim-time                    stamp with Isaac's /clock - needed with target:=isaac (teleop runs on sim time there)
 
-Run after:  ros2 launch rebel_demo teleop.launch.py target:=rviz mocap_bridge:=false            (rig:=left default)
-    python3 tools/fake_hand.py
-    python3 tools/fake_hand.py --arm both --loop        # with  ... rig:=both
-    python3 tools/fake_hand.py --arm both --pattern cross --loop   # up / down / left / right
-    python3 tools/fake_hand.py --arm both --sim-time    # with  ... target:=isaac rig:=both  (Isaac or fake_isaac.py)
+Run after:  ros2 launch rebel_demo teleop.launch.py target:=rviz mocap_bridge:=false            (rig:=both default)
+    python3 tools/fake_hand.py --loop
+    python3 tools/fake_hand.py --pattern cross --loop   # up / down / left / right
+    python3 tools/fake_hand.py --sim-time               # with  ... target:=isaac  (Isaac or fake_isaac.py)
+    python3 tools/fake_hand.py --arm left               # with  ... rig:=left  (one arm; engage service /rebel_teleop/engage)
 """
 import argparse
 import math
@@ -81,7 +82,7 @@ class Hand:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--arm", default="left", choices=["left", "right", "both"])
+    ap.add_argument("--arm", default="both", choices=["left", "right", "both"])
     ap.add_argument("--service", default=None, help="engage service (default /rebel_teleop/engage, "
                                                       "with --arm both /rebel_teleop_left|right/engage)")
     ap.add_argument("--down", type=float, default=0.10, help="metres down in the arm's base frame")
@@ -111,10 +112,12 @@ def main():
                     help="close the gripper by rotating the fingertip body 150 deg (gripper_mode:=orientation) "
                          "instead of moving it closer")
     ap.add_argument("--sim-time", action="store_true", help="use Isaac's /clock (target:=isaac)")
-    ap.add_argument("--palm", default="1", help="one arm: palm rigid body (streaming ID, or a full frame name)")
-    ap.add_argument("--finger", default="2", help="one arm: fingertip rigid body (streaming ID, or a full frame name)")
+    ap.add_argument("--palm", default=None, help="one arm: palm streaming ID or frame name (default 1 for left, 3 for right)")
+    ap.add_argument("--finger", default=None, help="one arm: fingertip streaming ID or frame name (default 2 for left, 4 for right)")
     args = ap.parse_args()
-    args.palm, args.finger = (f"rigid_body_{v}" if v.isdigit() else v for v in (args.palm, args.finger))
+    ids = {"left": ("1", "2"), "right": ("3", "4")}.get(args.arm, ("1", "2"))
+    args.palm, args.finger = (f"rigid_body_{v}" if v.isdigit() else v
+                              for v in (args.palm or ids[0], args.finger or ids[1]))
     if args.unstable:
         args.jitter = 0.002 if args.jitter is None else args.jitter
         args.dropouts, args.freezes, args.outliers = args.dropouts or 0.3, args.freezes or 0.15, args.outliers or 0.5

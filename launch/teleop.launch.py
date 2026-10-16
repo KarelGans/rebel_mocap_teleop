@@ -4,7 +4,8 @@
 #   ros2 launch rebel_demo teleop.launch.py target:=rviz               # RViz only, no Isaac (safe first test)
 #   ros2 launch rebel_demo teleop.launch.py target:=isaac rviz:=false  # Isaac playing, rig bridge scripts run
 #   ros2 service call /rebel_teleop/engage std_srvs/srv/SetBool "{data: true}"
-# rig:=left (default) | right = one arm of the rig; rig:=both = two hands, engage /rebel_teleop_left|right/engage.
+# rig:=both (default) = two hands, engage /rebel_teleop_left|right/engage; rig:=left | right = one arm (the other holds its pose),
+# which uses that side's left_* / right_* frame arguments and the node names /rebel_teleop, /rebel_gripper.
 #
 # robot_xyz / robot_ypr = where the rig's "world" sits in the mocap "map" frame (Z-up, metres, radians).
 # This publishes the static TF  map -> world.
@@ -42,6 +43,10 @@ def setup(context):
     rig = a("rig")
     if rig not in ("left", "right", "both"):
         raise RuntimeError(f"rig:={rig} - use rig:=left, right or both")
+    removed = [n for n in ("hand_frame", "gripper_frame") if n in context.launch_configurations]
+    if removed:      # silently ignoring them would use the default IDs of the wrong hand
+        raise RuntimeError(f"{', '.join(removed)} no longer exist: use left_hand_frame / left_gripper_frame (rig:=left or both) "
+                           f"and right_hand_frame / right_gripper_frame (rig:=right or both), e.g. left_hand_frame:=1")
     if rig == "both" and a("joint_names"):
         raise RuntimeError("joint_names is for one arm only; rig:=both uses arm_left_/arm_right_ joint1..6")
     if a("orientation").lower() not in ("false", "true", "semi"):
@@ -57,12 +62,12 @@ def setup(context):
     sides = ["left", "right"] if rig == "both" else [rig]
     arms = []
     for side in sides:
-        hand = frame(a(f"{side}_hand_frame") if rig == "both" else a("hand_frame"))
+        hand = frame(a(f"{side}_hand_frame"))
         arms.append({
             "suffix": f"_{side}" if rig == "both" else "",     # node names: rebel_teleop_left / rebel_teleop
             "prefix": f"arm_{side}_", "base_frame": f"arm_{side}_base_link", "grip_prefix": f"arm_{side}_xeg32_",
             "hand": hand,
-            "finger": frame(a(f"{side}_gripper_frame") if rig == "both" else a("gripper_frame")),
+            "finger": frame(a(f"{side}_gripper_frame")),
             "ref": hand,                                       # each gripper measures its fingertip against its own hand
         })
     # Isaac's bridge stamps joint states with SIM time and publishes /clock; all nodes must use that clock, otherwise
@@ -149,8 +154,6 @@ def generate_launch_description():
     D = DeclareLaunchArgument
     return LaunchDescription([
         D("target", default_value="rviz", description="rviz (no Isaac: joint states are faked) | isaac"),
-        D("hand_frame", default_value="1",
-          description="Motive streaming ID of your hand's rigid body (\"1\"; the full TF name \"rigid_body_1\" also works)"),
         D("mocap_bridge", default_value="true", description="convert /rigid_bodies to TF (mocap4r2 driver)"),
         D("mocap_frame", default_value="map", description="Z-up mocap frame from mocap4ros2_optitrack"),
         D("robot_xyz", default_value="0 0 0", description="robot base position in mocap_frame [m]"),
@@ -180,7 +183,6 @@ def generate_launch_description():
         D("mesh_lod", default_value="low", description="low (decimated meshes, light RViz) | full (CAD)"),
         D("lock_gripper", default_value="false", description="true = XEG joints fixed in the model"),
         D("gripper", default_value="true", description="control the XEG-32 with a second rigid body"),
-        D("gripper_frame", default_value="2", description="Motive streaming ID of the gripper-control rigid body"),
         D("gripper_mode", default_value="distance",
           description="distance = fingertip <-> palm distance | orientation = their relative rotation angle"),
         D("gripper_open_angle", default_value="30", description="orientation mode: open below this angle [deg]"),
@@ -188,12 +190,12 @@ def generate_launch_description():
         D("gripper_threshold", default_value="0.08", description="palm <-> fingertip switching distance [m]"),
         D("gripper_hysteresis", default_value="0.02", description="dead band [m] around the threshold (anti-chatter)"),
         D("gripper_invert", default_value="false", description="true = far closes, near opens"),
-        D("rig", default_value="left",
+        D("rig", default_value="both",
           description="left | right = that arm of the Isaac dual-arm rig | both = both arms, two hands"),
-        D("left_hand_frame", default_value="1", description="rig:=both: streaming ID of the left palm rigid body"),
-        D("left_gripper_frame", default_value="2", description="rig:=both: streaming ID of the left fingertip rigid body"),
-        D("right_hand_frame", default_value="3", description="rig:=both: streaming ID of the right palm rigid body"),
-        D("right_gripper_frame", default_value="4", description="rig:=both: streaming ID of the right fingertip rigid body"),
+        D("left_hand_frame", default_value="1", description="streaming ID of the left palm rigid body (rig:=left or both)"),
+        D("left_gripper_frame", default_value="2", description="streaming ID of the left fingertip rigid body (rig:=left or both)"),
+        D("right_hand_frame", default_value="3", description="streaming ID of the right palm rigid body (rig:=right or both)"),
+        D("right_gripper_frame", default_value="4", description="streaming ID of the right fingertip rigid body (rig:=right or both)"),
         D("rig_xacro", default_value="dual_arm_rig_v2.urdf.xacro",
           description="rig model in igus_rebel_description/urdf (dual_arm_rig_v2 or dual_arm_rig)"),
         D("joint_names", default_value="",
