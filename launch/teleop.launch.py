@@ -63,7 +63,7 @@ def setup(context):
             "prefix": f"arm_{side}_", "base_frame": f"arm_{side}_base_link", "grip_prefix": f"arm_{side}_xeg32_",
             "hand": hand,
             "finger": frame(a(f"{side}_gripper_frame") if rig == "both" else a("gripper_frame")),
-            "ref": hand if rig == "both" else (frame(a("gripper_ref_frame")) if a("gripper_ref_frame") else hand),
+            "ref": hand,                                       # each gripper measures its fingertip against its own hand
         })
     # Isaac's bridge stamps joint states with SIM time and publishes /clock; all nodes must use that clock, otherwise
     # the arm TF (sim time) and the hand TF (PC time) never share a time and teleop holds at HOME. RViz-only: PC time.
@@ -181,8 +181,6 @@ def generate_launch_description():
         D("lock_gripper", default_value="false", description="true = XEG joints fixed in the model"),
         D("gripper", default_value="true", description="control the XEG-32 with a second rigid body"),
         D("gripper_frame", default_value="2", description="Motive streaming ID of the gripper-control rigid body"),
-        D("gripper_ref_frame", default_value="",
-          description="streaming ID; opening = distance gripper_frame <-> this body ('' = hand_frame)"),
         D("gripper_mode", default_value="distance",
           description="distance = fingertip <-> palm distance | orientation = their relative rotation angle"),
         D("gripper_open_angle", default_value="30", description="orientation mode: open below this angle [deg]"),
