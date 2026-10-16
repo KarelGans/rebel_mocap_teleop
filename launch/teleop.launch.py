@@ -38,6 +38,8 @@ def setup(context):
         raise RuntimeError(f"rig:={rig} - use rig:=left, right or both")
     if rig == "both" and a("joint_names"):
         raise RuntimeError("joint_names is for one arm only; rig:=both uses arm_left_/arm_right_ joint1..6")
+    if a("orientation").lower() not in ("false", "true", "semi"):
+        raise RuntimeError(f"orientation:={a('orientation')} - use false, true or semi")
     isaac = a("target") == "isaac"
     urdf = xacro.process_file(
         os.path.join(get_package_share_directory("igus_rebel_description"), "urdf", a("rig_xacro")),
@@ -85,10 +87,15 @@ def setup(context):
                               "joint_states_topic": js_topic,
                               "hand_frame": arm["hand"],
                               "mode": a("mode"),
-                              "scale": float(a("scale")),
+                              "scale_trans": float(a("scale_trans") or a("scale") or "1.0"),
+                              "scale_rot": float(a("scale_rot")),
                               "orientation": a("orientation").lower() == "true",
+                              "roll_follow": a("orientation").lower() == "semi",
+                              "roll_sign": float(a("roll_sign")),
                               "cutoff_hz": float(a("cutoff_hz")),
                               "max_joint_speed_deg": float(a("max_joint_speed_deg")),
+                              "skip_home": a("skip_home").lower() == "true",
+                              "home_deg": a("home_deg"),
                               "limit_warn_mm": float(a("limit_warn_mm")),
                               "workspace_min": [float(v) for v in a("workspace_min").split()],
                               "workspace_max": [float(v) for v in a("workspace_max").split()],
@@ -118,6 +125,13 @@ def setup(context):
                       parameters=[{"inputs": ",".join(merge_inputs),
                                    "output": command_topic if isaac else js_topic,
                                    "defaults": "" if isaac else ",".join(movable_joints(urdf))}]))
+    if isaac and a("fake_state").lower() == "true":
+        # Nobody publishes the rig's joint states (no Isaac / real robot without a state publisher): robot_state_publisher
+        # then has no TF for the movable lift / slider joints, the arm frames never connect to the mocap frame and teleop
+        # holds forever. This second merger plays Isaac's state publisher: commanded joints + the others at 0.
+        nodes.append(Node(package="rebel_demo", executable="joint_merger", name="rig_state_fake", output="screen",
+                          parameters=[{"inputs": ",".join(merge_inputs), "output": js_topic,
+                                       "defaults": ",".join(movable_joints(urdf))}]))
     if a("mocap_bridge").lower() == "true":     # mocap4r2 driver publishes /rigid_bodies only, no TF
         nodes.append(Node(package="rebel_demo", executable="mocap_tf", output="screen"))
     if a("rviz").lower() == "true":
@@ -137,10 +151,23 @@ def generate_launch_description():
         D("robot_xyz", default_value="0 0 0", description="robot base position in mocap_frame [m]"),
         D("robot_ypr", default_value="0 0 0", description="robot base yaw pitch roll in mocap_frame [rad]"),
         D("mode", default_value="relative", description="relative (clutch) | absolute"),
-        D("scale", default_value="1.0"),
-        D("orientation", default_value="false", description="true = follow hand rotation too"),
+        D("scale_trans", default_value="",
+          description="hand translation -> robot translation gain (relative mode); '' = the value of `scale`, else 1.0"),
+        D("scale_rot", default_value="1.0",
+          description="hand rotation -> robot rotation gain: wrist with orientation:=true, joint 6 roll with orientation:=semi"),
+        D("scale", default_value="", description="deprecated alias of scale_trans"),
+        D("orientation", default_value="false",
+          description="false = position only | true = follow hand rotation too | semi = position only + joint 6 "
+                      "follows the hand's roll about the tool axis"),
+        D("roll_sign", default_value="1.0", description="orientation:=semi: -1 flips the joint 6 direction"),
         D("cutoff_hz", default_value="4.0", description="low-pass cutoff on the hand pose"),
         D("max_joint_speed_deg", default_value="45.0"),
+        D("fake_state", default_value="false",
+          description="target:=isaac only: publish the rig joint states from the commands (when no Isaac / robot does)"),
+        D("home_deg", default_value="0 0 0 0 0 0",
+          description="start pose of every arm, 6 joint angles [deg] (e.g. \"0 0 100 0 50 0\"); the arm moves there at start"),
+        D("skip_home", default_value="false",
+          description="true = do not move to HOME at start (robot already there); engage right away"),
         D("limit_warn_mm", default_value="5", description="warn 'joint limit reached' when the IK is this far [mm] off the target"),
         D("workspace_min", default_value="-0.7 -0.7 -0.45", description="IK target clamp min x y z in the arm base frame [m]"),
         D("workspace_max", default_value="0.7 0.7 0.95",

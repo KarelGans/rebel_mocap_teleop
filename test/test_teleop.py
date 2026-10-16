@@ -3,18 +3,22 @@ import math
 
 import numpy as np
 
-from rebel_demo.kinematics import HOME, LOWER, UPPER, fk, ik, quat_to_matrix
+from src.rebel_demo.kinematics import (HOME, LOWER, UPPER, fk, ik, parse_pose_deg, quat_to_matrix, rot, scale_rotation,
+                                       twist_about)
+
+# the bent-elbow "ready" pose (the former HOME; HOME is now all zeros = arm straight up)
+READY = np.radians([0.0, 13.4, 87.9, 0.0, 78.7, 0.0])
 
 
 def test_home_pose():
-    T = fk(HOME)                                   # tool0 35 cm in front, 30 cm up, pointing straight down
+    T = fk(READY)                                   # tool0 35 cm in front, 30 cm up, pointing straight down
     assert np.allclose(T[:3, 3], [0.35, 0, 0.30], atol=2e-3)
     assert np.allclose(T[:3, 2], [0, 0, -1], atol=1e-2)
-    assert HOME[2] > 0                             # elbow bent the normal way
+    assert READY[2] > 0                             # elbow bent the normal way
 
 
 def test_analytic_jacobian():
-    from rebel_demo.kinematics import fk_jac
+    from src.rebel_demo.kinematics import fk_jac
     q = np.radians([10, 30, 60, -20, 40, 15])
     T, J = fk_jac(q)
     for i in range(6):
@@ -31,7 +35,7 @@ def test_spec_sheet_limits():
 def test_ik_round_trip():
     rng = np.random.default_rng(1)
     for _ in range(20):
-        q = HOME + rng.uniform(-0.4, 0.4, 6)
+        q = READY + rng.uniform(-0.4, 0.4, 6)
         _, pe, re = ik(fk(q), q + rng.uniform(-0.1, 0.1, 6))
         assert pe < 1e-3 and re < 0.5
 
@@ -46,7 +50,7 @@ def test_gripper_threshold_hysteresis():
     import importlib.util
     if importlib.util.find_spec("rclpy") is None:
         return
-    from rebel_demo.gripper_node import next_state
+    from src.rebel_demo.gripper_node import next_state
     assert next_state(0.02, 1, 0.06, 0.01) == 0           # near -> close
     assert next_state(0.10, 0, 0.06, 0.01) == 1           # far -> open
     assert next_state(0.062, 0, 0.06, 0.01) == 0          # inside dead band -> keep
@@ -64,7 +68,7 @@ def test_gripper_orientation_angle():
     import importlib.util
     if importlib.util.find_spec("rclpy") is None:
         return
-    from rebel_demo.gripper_node import next_state_angle, quat_mul, rotation_angle_deg
+    from src.rebel_demo.gripper_node import next_state_angle, quat_mul, rotation_angle_deg
     assert abs(rotation_angle_deg((0, 0, 0, 1))) < 1e-9
     for axis in [(1, 0, 0), (0, 1, 0), (0, 0, 1), (1, 1, 0)]:
         assert abs(rotation_angle_deg(_q(axis, 180)) - 180) < 1e-6          # flipped about any axis
@@ -86,7 +90,7 @@ def test_gripper_angle_bands():
     import importlib.util
     if importlib.util.find_spec("rclpy") is None:
         return
-    from rebel_demo.gripper_node import next_state_angle
+    from src.rebel_demo.gripper_node import next_state_angle
     assert next_state_angle(10, 0, 30, 100) == 1           # same plane -> open
     assert next_state_angle(170, 1, 30, 100) == 0          # reversed -> closed
     assert next_state_angle(60, 1, 30, 100) == 1           # in between -> keep
@@ -98,7 +102,7 @@ def test_keyboard_debounce():
     import importlib.util
     if importlib.util.find_spec("rclpy") is None:
         return
-    from rebel_demo.keyboard_node import KeyDebounce
+    from src.rebel_demo.keyboard_node import KeyDebounce
     d = KeyDebounce(0.3)
     assert d(10.0) is True
     assert d(10.1) is False                 # key repeat of a held SPACE
@@ -106,12 +110,12 @@ def test_keyboard_debounce():
 
 
 def test_limits_hit():
-    from rebel_demo.kinematics import limits_hit
-    assert limits_hit(HOME) == []                                   # HOME is well inside every limit
-    q = HOME.copy()
+    from src.rebel_demo.kinematics import limits_hit
+    assert limits_hit(READY) == []                                   # READY is well inside every limit
+    q = READY.copy()
     q[1], q[2] = UPPER[1], LOWER[2]                                 # shoulder at its upper limit, elbow at the bound
     assert limits_hit(q) == [(1, "upper"), (2, "lower")]
-    q = HOME.copy()
+    q = READY.copy()
     q[2] = LOWER[2] + math.radians(0.5)                             # inside the 1 deg margin
     assert limits_hit(q) == [(2, "lower")]
     assert limits_hit(q, margin_deg=0.1) == []                      # outside a tighter margin
@@ -131,3 +135,49 @@ def test_ik_unreachable_target_stays_inside_limits_and_gets_close():
         qi, pe, _ = ik(near, q, w_rot=0.0, iters=25, q_rest=HOME)
         q = np.clip(q + np.clip(qi - q, -0.0125, 0.0125), LOWER, UPPER)
     assert np.linalg.norm(fk(q)[:3, 3] - near[:3, 3]) < 0.14
+
+
+def test_twist_about_pure_rotation_tilt_and_wrap():
+    z = np.array([0.0, 0.0, 1.0])
+    for deg in (-170, -90, -30, 0, 30, 90, 170):
+        assert math.isclose(twist_about(rot(z, math.radians(deg)), z), math.radians(deg), abs_tol=1e-6)
+    assert abs(twist_about(rot(np.array([1.0, 0, 0]), math.radians(8)), z)) < 1e-6       # pure tilt: no twist
+    swing_twist = rot(np.array([1.0, 0, 0]), math.radians(8)) @ rot(z, math.radians(40))
+    assert math.isclose(twist_about(swing_twist, z), math.radians(40), abs_tol=math.radians(1))
+    assert math.isclose(abs(twist_about(rot(z, math.pi), z)), math.pi, abs_tol=1e-6)    # 180 deg, no NaN
+
+
+def test_parse_pose_deg_and_start_pose():
+    q = parse_pose_deg("0 0 100 0 50 0")
+    assert np.allclose(np.degrees(q), [0, 0, 100, 0, 50, 0])
+    assert np.allclose(parse_pose_deg("0, 0, 100, 0, 50, 0"), q)             # commas work too
+    assert np.allclose(parse_pose_deg("0 0 0 0 0 0"), 0)                      # the default (below the 15 deg IK bound) is valid
+    for bad in ("0 0 100", "0 0 100 0 50 0 0", "a b c d e f", "0 0 100 0 120 0", "0 0 -100 0 50 0"):
+        try:
+            parse_pose_deg(bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"accepted {bad!r}")                             # joint5 120 > 95; joint3 -100 < -80
+    from src.rebel_demo.kinematics import limits_hit
+    assert limits_hit(q) == []                                               # well inside every limit
+    T = fk(q)
+    assert np.allclose(T[:3, 3], [0.36, 0, 0.33], atol=0.01)
+    for d in ([0.1, 0, 0], [0, 0.1, 0], [0, 0, 0.1], [-0.1, 0, -0.1]):       # IK holds targets around the start pose
+        Tg = T.copy()
+        Tg[:3, 3] += d
+        _, pe, _ = ik(Tg, q, w_rot=0.0, iters=25, q_rest=q)
+        assert pe < 1e-3
+
+
+def test_scale_rotation():
+    axis = np.array([1.0, 2.0, 2.0]) / 3.0
+    for deg in (1, 30, 90, 170):
+        R = rot(axis, math.radians(deg))
+        assert scale_rotation(R, 1.0) is R                                     # k = 1 is exactly today's behaviour
+        assert np.allclose(scale_rotation(R, 0.0), np.eye(3))
+        assert np.allclose(scale_rotation(R, 0.5), rot(axis, math.radians(deg) / 2), atol=1e-9)
+        assert np.allclose(scale_rotation(R, 2.0), rot(axis, math.radians(deg) * 2), atol=1e-9)
+    assert np.allclose(scale_rotation(np.eye(3), 3.0), np.eye(3))               # no rotation stays none
+    R = rot(axis, math.radians(40))
+    out = scale_rotation(R, 0.25)
+    assert math.isclose(twist_about(out, axis), math.radians(10), abs_tol=1e-9)  # same axis, a quarter of the angle

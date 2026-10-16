@@ -17,12 +17,18 @@ Clutch (relative mode): call the service  ~/engage  (std_srvs/SetBool)
 Pause = the robot holds its last command; resume = the robot's last pose and your hand's pose at that moment
 become the new reference, so you continue from where it stopped (the gripper node is not affected).
 Topic ~/engaged (std_msgs/Bool, latched) shows the current state.
-While engaged:  robot_target = robot_pose_at_engage + scale * (hand_now - hand_at_engage)
+While engaged:  robot_target = robot_pose_at_engage + scale_trans * (hand_now - hand_at_engage)
+                (orientation:=true also rotates it by scale_rot x the hand's rotation since engage)
 
 Parameters (defaults in brackets)
   base_frame [arm_left_base_link]  hand_frame [HAND]          TF frames (hand = rigid body name in mocap config)
   rate_hz [60]            mode [relative]            relative | absolute
-  scale [1.0]             orientation [false]        false = position only (wrist free), true = full pose
+  scale_trans [1.0]       gain on the hand's translation since engage (relative mode); `scale` is an alias
+  scale_rot [1.0]         gain on the hand's rotation since engage: the wrist rotation with orientation:=true, the joint 6
+                          roll with orientation:=semi (relative mode; unused with orientation:=false)
+  orientation [false]     false = position only (wrist free), true = full pose
+  roll_follow [false]     position only + joint 6 follows the hand's roll about the tool axis (launch: orientation:=semi)
+  roll_sign [1.0]         joint6 = joint6 at engage + sign * scale_rot * hand twist; sign -1 flips the direction
   cutoff_hz [4.0]         low-pass cutoff for the hand pose
   max_joint_speed_deg [45]  stale_timeout [0.2]      s without a new pose -> hold
   workspace_min [-0.7,-0.7,-0.45]  workspace_max [0.7,0.7,0.95]   target clamp in base_frame [m]
@@ -36,9 +42,13 @@ Parameters (defaults in brackets)
   max_hand_speed [2.0]    m/s; a sample jumping further than this (+1 cm) is a marker glitch and ignored for up to 0.1 s
   max_tool_speed [0.5]    m/s; the IK target never moves faster (smooth catch-up after a tracking gap)
   home_wait [1.0]         s to wait for joint states at start; the robot then moves from there to HOME
+  home_deg ["0 0 0 0 0 0"]  HOME pose, 6 joint angles in degrees (launch: home_deg:="0 0 100 0 50 0"); the start move
+                          goes there and the IK's posture preference pulls towards it
+  skip_home [false]       true = do not move to HOME at start: take the measured joints (all zeros if none arrive within
+                          home_wait) as the start pose and allow ~/engage at once. For a robot that already is at HOME.
 
-Startup / HOME: the node starts from the measured joints (or HOME if none arrive) and drives to HOME in joint space
-at max_joint_speed_deg; engage is refused until it is there. Service ~/home (std_srvs/Trigger) does the same later:
+Startup / HOME: the node starts from the measured joints (all zeros if none arrive: a robot without joint feedback is
+assumed to be straight up) and drives to HOME in joint space at max_joint_speed_deg; engage is refused until it is there. Service ~/home (std_srvs/Trigger) does the same later:
   ros2 service call /rebel_teleop/home std_srvs/srv/Trigger
   joint_prefix [arm_left_]  joint names = prefix + joint1..joint6 (arm_left_ / arm_right_ on the dual-arm rig)
   joint_names ['']        6 comma-separated names (base to wrist), overrides joint_prefix, e.g. "a_1,a_2,...,a_6"
@@ -57,7 +67,8 @@ from std_msgs.msg import Bool
 from std_srvs.srv import SetBool, Trigger
 from tf2_ros import Buffer, TransformException, TransformListener
 
-from .kinematics import HOME, JOINT_NAMES, LOWER, UPPER, fk, ik, limits_hit, quat_to_matrix
+from .kinematics import (JOINT_NAMES, LOWER, UPPER, fk, ik, limits_hit, parse_pose_deg, quat_to_matrix, scale_rotation,
+                         twist_about)
 
 
 def matrix_to_quat(R):
@@ -118,8 +129,13 @@ class Teleop(Node):
         self.hand_frame = d("hand_frame", "HAND").value
         self.rate = float(d("rate_hz", 60.0).value)
         self.mode = d("mode", "relative").value
-        self.scale = float(d("scale", 1.0).value)
+        scale_alias = float(d("scale", 1.0).value)                        # old name of scale_trans
+        self.scale_trans = float(d("scale_trans", scale_alias).value)
+        self.scale_rot = float(d("scale_rot", 1.0).value)
         self.use_orientation = bool(d("orientation", False).value)
+        self.roll_follow = bool(d("roll_follow", False).value) and not self.use_orientation
+        self.roll_sign = float(d("roll_sign", 1.0).value)
+        self.roll_axis, self.q6_ref, self.twist_prev, self.twist_acc = None, 0.0, 0.0, 0.0
         self.filter = PoseLowPass(float(d("cutoff_hz", 4.0).value))
         self.vmax = math.radians(float(d("max_joint_speed_deg", 45.0).value))
         self.stale = float(d("stale_timeout", 0.2).value)
@@ -133,6 +149,8 @@ class Teleop(Node):
         self.good_p, self.good_t, self.glitch_since = None, None, None   # outlier gate state
         self.target = None                                                # last IK target position (rate limit)
         self.home_wait = float(d("home_wait", 1.0).value)
+        self.skip_home = bool(d("skip_home", False).value)
+        self.home = parse_pose_deg(d("home_deg", "0 0 0 0 0 0").value)    # HOME [rad]; raises on bad input
         self.engaged = bool(d("start_engaged", self.mode == "absolute").value)
         topic = d("command_topic", "/dual_arm/isaac_joint_commands").value
         self.pub_js = bool(d("publish_joint_states", False).value)
@@ -173,7 +191,8 @@ class Teleop(Node):
         self.create_timer(self.dt, self.step)
         self.get_logger().info(
             f"teleop: {self.hand_frame} -> {self.base_frame} ({self.joint_names[0]}..), mode={self.mode}, "
-            f"{'full pose' if self.use_orientation else 'position only'}, {self.rate:.0f} Hz -> {topic}"
+            f"{'full pose' if self.use_orientation else 'position + joint6 roll' if self.roll_follow else 'position only'}"
+            f", {self.rate:.0f} Hz -> {topic}"
             + ("" if self.engaged else "  (NOT engaged: call ~/engage true, or press SPACE in teleop_keyboard)"))
         self.pub_engaged.publish(Bool(data=self.engaged))
 
@@ -222,12 +241,18 @@ class Teleop(Node):
                 return
             # start from the measured pose as it is (may be outside the IK bounds, e.g. Isaac's straight-up start with
             # joint3 = 0 < the 15 deg elbow bound); clipping here would jump joint3 in one cycle
-            self.q_cmd = (self.q_meas if self.q_meas is not None else HOME).copy()
-            self.get_logger().info("start pose %s deg -> moving to HOME %s deg" % (
-                np.degrees(self.q_cmd).round(1).tolist(), np.degrees(HOME).round(1).tolist()))
-        d = HOME - self.q_cmd
+            self.q_cmd = (self.q_meas if self.q_meas is not None else np.zeros(6)).copy()
+            self.get_logger().info("start pose %s deg%s -> moving to HOME %s deg" % (
+                np.degrees(self.q_cmd).round(1).tolist(), "" if self.q_meas is not None else " (assumed: no joint states)",
+                np.degrees(self.home).round(1).tolist()))
+        if self.skip_home:                                         # robot is already where it should be: no move
+            self.homing = False
+            self.get_logger().info("skip_home: starting from the current pose - call ~/engage true to start")
+            self.publish(self.q_cmd)
+            return
+        d = self.home - self.q_cmd
         n = np.max(np.abs(d)) / (self.vmax * self.dt)              # cycles the slowest joint needs
-        self.q_cmd = HOME.copy() if n <= 1 else self.q_cmd + d / n
+        self.q_cmd = self.home.copy() if n <= 1 else self.q_cmd + d / n
         if n <= 1:
             self.homing = False
             self.get_logger().info("at HOME - call ~/engage true to start")
@@ -303,12 +328,14 @@ class Teleop(Node):
             if self.hand_ref is None:                      # anchor: hand now <-> robot now
                 self.hand_ref = (p_f.copy(), R_f.copy())
                 self.robot_ref = fk(self.q_cmd)
+                self.roll_axis = self.robot_ref[:3, 2].copy()      # tool0 z = joint6 axis, base frame
+                self.q6_ref, self.twist_prev, self.twist_acc = float(self.q_cmd[5]), 0.0, 0.0
                 self.get_logger().info("anchored: tool at (%.3f, %.3f, %.3f) m <-> hand at (%.3f, %.3f, %.3f) m"
                                        % (*self.robot_ref[:3, 3], *p_f))
             T = self.robot_ref.copy()
-            T[:3, 3] = self.robot_ref[:3, 3] + self.scale * (p_f - self.hand_ref[0])
+            T[:3, 3] = self.robot_ref[:3, 3] + self.scale_trans * (p_f - self.hand_ref[0])
             if self.use_orientation:
-                T[:3, :3] = (R_f @ self.hand_ref[1].T) @ self.robot_ref[:3, :3]
+                T[:3, :3] = scale_rotation(R_f @ self.hand_ref[1].T, self.scale_rot) @ self.robot_ref[:3, :3]
         else:                                               # absolute: flange = hand pose
             T = np.eye(4)
             T[:3, :3], T[:3, 3] = R_f, p_f
@@ -336,7 +363,19 @@ class Teleop(Node):
 
         # 5. real-time IK, warm-started from the last command
         w_rot = 0.3 if self.use_orientation else 0.0
-        q_ik, pe, re = ik(T, seed, w_rot=w_rot, iters=25, q_rest=None if self.use_orientation else HOME)
+        q_rest = None if self.use_orientation else self.home
+        if self.roll_follow and self.mode == "relative" and self.roll_axis is not None:
+            q_rest = self.home.copy()
+            q_rest[5] = seed[5]                            # no pull of joint 6 towards HOME: the hand roll owns it
+        q_ik, pe, re = ik(T, seed, w_rot=w_rot, iters=25, q_rest=q_rest)
+        if self.roll_follow and self.mode == "relative" and self.roll_axis is not None:
+            # joint 6 spins about the tool axis, so it cannot change the tool position: drive it directly from the
+            # twist of the hand about that axis (tilts of the hand contribute ~0), continuous across +-180 deg
+            twist = twist_about(R_f @ self.hand_ref[1].T, self.roll_axis)
+            self.twist_acc += (twist - self.twist_prev + math.pi) % (2 * math.pi) - math.pi
+            self.twist_prev = twist
+            q_ik[5] = float(np.clip(self.q6_ref + self.roll_sign * self.scale_rot * self.twist_acc,
+                                    LOWER[5], UPPER[5]))
         hits = limits_hit(q_ik) if pe > self.limit_warn else []
         if hits:                                           # a joint limit is what keeps the IK off the target
             self.limit_active = True

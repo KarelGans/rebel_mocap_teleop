@@ -2,7 +2,7 @@
 
 Run it in its OWN terminal (ros2 launch does not give nodes a keyboard) and keep that terminal focused:
   ros2 run rebel_demo teleop_keyboard
-  SPACE  pause <-> resume      q / Ctrl-C  quit
+  SPACE  pause <-> resume      l / r  toggle only the left / right arm      q / Ctrl-C  quit
 Only the arm teleop is paused; Isaac Sim keeps running and the gripper node is not affected. On resume the robot's
 last pose and your hand's pose at that moment are the new reference (see teleop_node.py).
 
@@ -60,6 +60,17 @@ class Keyboard(Node):
                 continue
             client.call_async(SetBool.Request(data=engage))  # the new state is printed via <node>/engaged
 
+    def toggle_one(self, side):
+        """Pause / resume only the arm whose teleop node name ends with `side` (left | right)."""
+        name = next((n for n in self.engage_clients if n.endswith(f"_{side}")), None)
+        if name is None:
+            print(f"\r[teleop_keyboard] no {side} arm in teleop:=... (rig:=both needed)", flush=True)
+        elif not self.engage_clients[name].service_is_ready():
+            print(f"\r[{name}] engage service not available - is the teleop node running?", flush=True)
+        else:
+            print(f"\r[teleop_keyboard] toggling {side} arm only", flush=True)
+            self.engage_clients[name].call_async(SetBool.Request(data=not self.running[name]))
+
 
 def main():
     if not sys.stdin.isatty():
@@ -69,13 +80,15 @@ def main():
     old = termios.tcgetattr(sys.stdin)
     try:
         tty.setcbreak(sys.stdin.fileno())                  # single keypresses, no Enter
-        print("SPACE = pause / resume the arm teleop, q = quit")
+        print("SPACE = pause / resume the arm teleop, l / r = left / right arm only, q = quit")
         while rclpy.ok():
             rclpy.spin_once(node, timeout_sec=0.05)
             if select.select([sys.stdin], [], [], 0)[0]:
                 ch = sys.stdin.read(1)
                 if ch == " " and node.debounce(node.get_clock().now().nanoseconds * 1e-9):
                     node.toggle()
+                elif ch in ("l", "L", "r", "R") and node.debounce(node.get_clock().now().nanoseconds * 1e-9):
+                    node.toggle_one("left" if ch in ("l", "L") else "right")
                 elif ch in ("q", "\x03"):
                     break
     except KeyboardInterrupt:

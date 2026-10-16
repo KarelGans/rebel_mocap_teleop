@@ -123,6 +123,14 @@ pip install pyarrow                                                         # re
 colcon build --symlink-install
 source install/setup.bash
 ```
+Build **both** packages (`igus_rebel_description` and `rebel_demo`). Copying `igus_rebel_description` into `src/`
+is not enough: `package 'igus_rebel_description' not found` at launch means it was never built. To build just it:
+`colcon build --packages-select igus_rebel_description`.
+
+If colcon fails with `No module named 'catkin_pkg'` and the log shows `.../miniconda3/bin/python3`, a conda
+environment is first on `PATH`. Run `conda deactivate` and build again (or add
+`--cmake-args -DPython3_EXECUTABLE=/usr/bin/python3`).
+
 Check the layout. `build`, `install`, `log` must sit next to `src`, not inside it:
 ```
 ~/rebel_ws/
@@ -130,7 +138,7 @@ Check the layout. `build`, `install`, `log` must sit next to `src`, not inside i
   src/
     igus_rebel_description/       <- from the igus mesh LOD bundle (not in this repo)
     rebel_demo/
-      launch/  rebel_demo/  resource/  rviz/  test/  tools/  urdf/
+      launch/  rebel_demo/  resource/  rviz/  test/  tools/
       package.xml  README.md  setup.cfg  setup.py
 ```
 Built in the wrong folder by mistake? Delete the stray output and rebuild from the root:
@@ -168,6 +176,16 @@ After changing any of these later, restart every ROS program (driver, teleop, Is
 `ros2 daemon stop`: running programs keep their old values.
 
 ## 4. Run
+**Every terminal** (driver, launch, `ros2 service call`, keyboard, recorder) must have both workspaces sourced,
+mocap first. Without the `~/.bashrc` lines from section 3, run in each new terminal:
+```bash
+source /opt/ros/$(ls /opt/ros)/setup.bash
+source ~/mocap_ws/install/setup.bash     # mocap4r2_msgs: needed by mocap_tf even with target:=isaac
+source ~/rebel_ws/install/setup.bash     # rebel_demo + igus_rebel_description
+```
+Skipping the mocap line makes the `mocap_tf` node die with `No module named 'mocap4r2_msgs'` (the rest of the launch
+keeps running, but no hand TF is published). Only `mocap_bridge:=false` (section 6) runs without it.
+
 One arm (`rig:=left` default, or `rig:=right`); for two hands see "Both arms" below.
 ```bash
 # terminal 1: driver (wait for "Configured!")
@@ -185,9 +203,13 @@ ros2 launch rebel_demo teleop.launch.py target:=isaac rig:=left hand_frame:=rigi
 # terminal 2: wait for "at HOME" in the launch log, then engage the clutch and move your hand slowly
 ros2 service call /rebel_teleop/engage std_srvs/srv/SetBool "{data: true}"
 ```
-At start the arm moves from its current joints to HOME (tool 35 cm in front of the arm base, 30 cm above it, pointing
-down, elbow bent) at the joint speed limit; engage is refused until `at HOME` is logged. Engaging never moves the arm.
+At start the arm moves from its current joints to HOME (all joints 0: arm straight up; `HOME` in `kinematics.py`) at
+the joint speed limit; engage is refused until `at HOME` is logged. Engaging never moves the arm.
 `{data: false}` releases the clutch: the robot holds, reposition your hand, engage again.
+Choose the start pose with `home_deg:="0 0 100 0 50 0"` (degrees, joints 1-6, both arms). The arm ramps from its measured
+joints to it at `max_joint_speed_deg`. **No joint feedback** (real robot with `fake_state:=true`)? Then the arm is *assumed* to be
+all zeros (straight up) and ramps from there, so the real robot must really be at zeros when you start.
+Robot already at HOME (e.g. a real arm powered up straight)? Add `skip_home:=true`: no start-up move (it ignores `home_deg` for the move), engage works at once.
 Back to HOME at any time (disengages): `ros2 service call /rebel_teleop/home std_srvs/srv/Trigger`.
 
 Pause / resume with the spacebar (own terminal, keep it focused; Isaac keeps running, the gripper is not affected):
@@ -199,6 +221,8 @@ ros2 run rebel_demo teleop_keyboard      # SPACE = pause <-> resume, q = quit
 On resume the robot's last pose and your hand's pose at that moment are the new reference, so you continue from
 where it stopped; hand motion during the pause is ignored (use it to reposition your hand). With two arms, SPACE
 pauses all of them if any runs, otherwise resumes all. The latched topic `/rebel_teleop/engaged` shows the state.
+
+`orientation:=semi`: the arm is solved exactly as with `orientation:=false` (position only, joints 1-5 identical), and joint 6 is set to its angle at engage + `roll_sign` x `scale_rot` x the twist of your hand about the tool axis (measured since engage; tilting the hand adds ~0; continuous past 180 deg; limited to +-179 deg and `max_joint_speed_deg`). Turn your hand like a doorknob and the gripper rolls. Wrong direction: `roll_sign:=-1`.
 
 Hand up must move the robot up. If it moves sideways the mocap frame is Y-up: set Motive streaming
 Up Axis to Z-up, or relaunch with `robot_ypr:="0 0 1.5708"` (or `-1.5708`).
@@ -222,7 +246,7 @@ RViz on another machine: `rviz2 -d $(ros2 pkg prefix rebel_demo)/share/rebel_dem
 1. Read the hand pose from TF (`arm_left_base_link <- rigid_body_1`).
 2. Tracking check: no update or a frozen pose for 0.2 s -> hold. A single-sample jump faster than a hand can move (`max_hand_speed`, 2 m/s) is a marker glitch and is skipped (accepted if it persists 0.1 s). Gaps under 2 s (`reanchor_after`) keep the anchor and the tool catches up at most at `max_tool_speed` (0.5 m/s); after a longer loss the clutch re-anchors when tracking returns (no jumps). TF is received in its own thread, so the IK never delays it.
 3. Low-pass filter on the hand pose (position: first order; orientation: slerp). Filtering before IK keeps marker jitter out of the joints.
-4. Clutch mapping: target = robot pose at engage + scale x (hand now - hand at engage); clamped to a workspace box (in the arm base frame, x/y +-0.7 m, z -0.45..0.95 m) that is widened to include the pose at engage, so engaging never moves the arm.
+4. Clutch mapping: target = robot pose at engage + scale_trans x (hand now - hand at engage) (and, with `orientation:=true`, rotated by `scale_rot` x the hand's rotation since engage); clamped to a workspace box (in the arm base frame, x/y +-0.7 m, z -0.45..0.95 m) that is widened to include the pose at engage, so engaging never moves the arm.
 5. IK (damped least squares with the analytic Jacobian, ~3 ms; joints that would cross a limit are pinned at it and the rest re-solved, so an unreachable target gives the closest reachable pose; warm-started from the last command; position only unless `orientation:=true`, the free wrist is pulled gently towards HOME). **Elbow up:** joint3 is kept >= +15 deg (lower limit in `kinematics.py`). In front of the arm every elbow-up solution has joint3 > 0, and the arm could only reach elbow-down by passing through the stretched arm (joint3 = 0); the bound stops it 15 deg before that. A target that would need a straighter arm is not reached: the arm holds at the bound and logs `joint limit reached: ... elbow-up bound 15 deg` (any joint at a limit is named the same way). At start-up the arm moves from its measured pose (e.g. Isaac's straight-up joint3 = 0) to HOME smoothly before the bound applies.
 6. Per-joint speed limit (default 45 deg/s, the real ReBeL maximum).
 7. Publish `sensor_msgs/JointState` (`arm_<side>_joint1..6`, radians); `joint_merger` combines all arms and grippers into one message on `command_topic` (default `/dual_arm/isaac_joint_commands`), or on `/dual_arm/isaac_joint_states` when `target:=rviz`.
@@ -233,8 +257,11 @@ RViz on another machine: `rviz2 -d $(ros2 pkg prefix rebel_demo)/share/rebel_dem
 | target | rviz | `rviz`: no Isaac, `joint_merger` publishes the rig's joint states; `isaac`: Isaac publishes them and gets the commands |
 | hand_frame | rigid_body_1 | TF frame of the hand = `rigid_body_` + Motive streaming ID (`rig:=left` / `right`) |
 | mode | relative | `relative` (clutch) or `absolute` (flange goes to the hand pose) |
-| scale | 1.0 | hand-to-robot motion ratio (0.5 = finer) |
-| orientation | false | true = follow hand rotation too |
+| scale_trans | 1.0 | hand-to-robot **translation** ratio (0.5 = finer). `scale` is the old name and still works as an alias; `scale_trans` wins if both are given |
+| scale_rot | 1.0 | hand-to-robot **rotation** ratio, relative mode: with `orientation:=true` the wrist turns by `scale_rot` x your hand rotation since engage; with `orientation:=semi` joint 6 turns by `scale_rot` x your hand roll; unused with `orientation:=false` |
+| orientation | false | `false` position only (wrist free; joint 6 never moves) · `true` follow the full hand rotation (swings joints 4/6 near the straight-up singularity) · `semi` position only **plus joint 6 follows your hand's roll** about the tool axis (see below) |
+| home_deg | `0 0 0 0 0 0` | start pose of every arm, 6 joint angles in degrees (e.g. `"0 0 100 0 50 0"`): the arm moves there at start, and the IK's posture preference pulls towards it. Must be inside the joint limits (checked at startup) |
+| roll_sign | 1.0 | `orientation:=semi`: `-1` flips the joint 6 direction (the roll gain is `scale_rot`) |
 | cutoff_hz | 4.0 | filter cutoff; lower = smoother but more lag |
 | max_joint_speed_deg | 45 | per-joint speed limit after IK |
 | workspace_min / workspace_max | -0.7 -0.7 -0.45 / 0.7 0.7 0.95 | IK target clamp x y z in the arm base frame [m]; widened to include the pose at engage; a warning names the bound that clamps |
@@ -337,7 +364,7 @@ In Isaac's Script Editor (stage loaded, timeline **stopped**), run the rig's thr
 `path_base` to where the scripts are:
 ```python
 scripts = ["dual_arm_rig_ros2_bridge.py", "sim_flap_weld.py", "sim_scene_control.py"]
-path_base = "/home/user1/Documents/compal_dual_arm/compal_robot/compal_robot/src/igus_rebel_description/urdf/igus_stand_dual_arm/"
+path_base = "/home/<you>/rebel_ws/src/igus_rebel_description/urdf/igus_stand_dual_arm/"   # absolute path, no "~"
 for script in scripts:
     with open(path_base + script) as f:
         exec(f.read())
@@ -389,8 +416,28 @@ ros2 run rebel_demo teleop_keyboard --ros-args -p teleop:=/rebel_teleop_left,/re
 - Two teleop nodes (`/rebel_teleop_left`, `/rebel_teleop_right`) and two gripper nodes (`/rebel_gripper_left`,
   `/rebel_gripper_right`; state on `/rebel_gripper_<side>/state`); each gripper measures its fingertip to its own palm.
 - All 12 arm joints and 4 jaw joints go to Isaac in one message per cycle (`joint_merger`).
-- `scale`, `mode`, `orientation`, `cutoff_hz`, `max_joint_speed_deg`, `gripper_threshold` / `gripper_hysteresis` apply
+- `scale_trans`, `scale_rot`, `mode`, `orientation`, `cutoff_hz`, `max_joint_speed_deg`, `gripper_threshold` / `gripper_hysteresis` apply
   to both arms. `hand_frame`, `gripper_frame`, `gripper_ref_frame` and `joint_names` are for one arm only.
+
+#### Example: Isaac Sim, both arms, joint 6 follows the hand roll (`orientation:=semi`)
+Isaac and every ROS terminal must share one `ROS_DOMAIN_ID` (here 11) and the same `RMW_IMPLEMENTATION`; start Isaac
+from a terminal where it is exported, then run the three bridge scripts and press **Play**.
+```bash
+export ROS_DOMAIN_ID=11
+source ~/mocap_ws/install/setup.bash
+source ~/dual_arm_control/install/setup.bash
+ros2 launch rebel_demo teleop.launch.py target:=isaac rig:=both rviz:=false scale:=1.0 cutoff_hz:=8.0 \
+  left_hand_frame:=rigid_body_2 left_gripper_frame:=rigid_body_4 \
+  right_hand_frame:=rigid_body_1 right_gripper_frame:=rigid_body_3 gripper_mode:=orientation \
+  orientation:=semi max_joint_speed_deg:=45 workspace_max:="0.7 0.7 1.4" \
+  home_deg:="0 0 100 0 50 0"
+```
+- Do **not** add `use_sim_time:=false` or `fake_state:=true` with Isaac: the bridge publishes `/clock` and the joint
+  states, and a second publisher with another clock gives `TF_OLD_DATA` warnings.
+- Restart the launch every time Isaac is stopped or reset (the sim clock restarts at 0).
+- `orientation:=semi`: position-only arm (joints 1-5 as `orientation:=false`), joint 6 follows your hand's roll;
+  `roll_sign:=-1` flips it, `scale_rot:=0.5` halves it. For first tests on a robot add `scale:=0.5 max_joint_speed_deg:=15`.
+- Slow movement: lower `max_joint_speed_deg` / `scale` are the cause; the defaults are 45 / 1.0.
 
 Record both arms (14 values per frame: left arm 6 + left gripper + right arm 6 + right gripper; `modality.json`
 parts `left_arm`, `left_gripper`, `right_arm`, `right_gripper`):
@@ -465,18 +512,65 @@ Options of `fake_hand.py`: `--arm left|right|both`, `--pattern reach|cross` (+ `
 drop-outs, frozen frames, marker glitches; or `--jitter`, `--dropouts`, `--freezes`, `--outliers`), `--rotate-finger`
 (with `gripper_mode:=orientation`). On this Mac the workspace is `~/Downloads/rebel_teleop_ws` instead of `~/rebel_ws`.
 
+## 7. Real robot (publish the commands for another node to consume)
+Teleop does not talk to hardware itself. It publishes **absolute joint positions** (radians, not deltas) as one
+`sensor_msgs/JointState` at 60 Hz on `/dual_arm/isaac_joint_commands` (change it with `command_topic:=/your/topic`).
+Your robot driver (or a small relay node) subscribes to that topic and forwards the values to the arm's controller.
+- Names: `arm_left_joint1..6`, `arm_right_joint1..6` (rad) and `arm_<side>_xeg32_left_carriage_joint` /
+  `..._right_carriage_joint` (jaw opening, m). Only `name` and `position` are filled in.
+- Without Isaac, pass `use_sim_time:=false`. Teleop also needs a joint-state feedback stream on
+  `/dual_arm/isaac_joint_states` (start pose, and the rig TF); if the robot does not publish one, add `fake_state:=true`
+  (states = the commanded joints, the rest 0). With a real state publisher leave `fake_state` off, two publishers clash.
+
+```bash
+export ROS_DOMAIN_ID=11
+source ~/mocap_ws/install/setup.bash
+source ~/dual_arm_control/install/setup.bash
+# robot powered up at all zeros (straight up); no joint states from it, so fake_state; it ramps to home_deg first
+ros2 launch rebel_demo teleop.launch.py target:=isaac rig:=both rviz:=false scale:=0.5 cutoff_hz:=6.0 \
+  left_hand_frame:=rigid_body_2 left_gripper_frame:=rigid_body_4 \
+  right_hand_frame:=rigid_body_1 right_gripper_frame:=rigid_body_3 gripper_mode:=orientation \
+  orientation:=semi max_joint_speed_deg:=15 workspace_max:="0.7 0.7 1.4" \
+  use_sim_time:=false fake_state:=true home_deg:="0 0 100 0 50 0"
+# robot already AT the pose you want (no start move): drop home_deg and add skip_home:=true instead
+```
+Check what is published (the merged topic must show **one** publisher, `joint_merger`):
+```bash
+ros2 topic hz   /dual_arm/isaac_joint_commands
+ros2 topic echo /dual_arm/isaac_joint_commands --once
+ros2 topic info /dual_arm/isaac_joint_commands -v
+ros2 topic echo /rebel_teleop_left/joint_commands --once --field position     # one arm, 6 values
+```
+Publish by hand to test the receiving side (stop teleop first, otherwise two publishers fight):
+```bash
+# move left joint 1 to 0.3 rad (about 17 deg)
+ros2 topic pub -r 10 /dual_arm/isaac_joint_commands sensor_msgs/msg/JointState \
+  "{name: [arm_left_joint1], position: [0.3]}"
+# several joints at once (radians)
+ros2 topic pub -r 10 /dual_arm/isaac_joint_commands sensor_msgs/msg/JointState \
+  "{name: [arm_left_joint1, arm_left_joint2, arm_left_joint3], position: [0.0, 0.2, 0.4]}"
+```
+Safety: there is no collision checking. Use `scale:=0.5 max_joint_speed_deg:=15` first, keep the e-stop in reach, and
+check the receiver's joint limits and zero positions match the rig model (joint2 -80..140 deg, joint3 -80..140 deg,
+joint5 +-95 deg, others +-179 deg; teleop also keeps joint3 >= 15 deg).
+
 ## Troubleshooting
 | symptom | fix |
 |---|---|
 | driver log `... not connected :(` | Motive streaming off or wrong Local Interface; firewall; IPs in the YAML. Relaunch the driver after fixing (it connects only at launch) |
 | `ping` to the Motive PC says Destination Host Unreachable | the two PCs are not on the same router/network |
 | `message type 'mocap4r2_msgs/msg/RigidBodies' is invalid` | `source ~/mocap_ws/install/setup.bash` |
+| `mocap_tf` dies: `No module named 'mocap4r2_msgs'` / `mocap4r2_msgs not found` | same: `source ~/mocap_ws/install/setup.bash` before `source ~/rebel_ws/install/setup.bash`, then relaunch (needed also for `target:=isaac`) |
+| `colcon build` fails: `No module named 'catkin_pkg'`, log shows `miniconda3/bin/python3` | `conda deactivate`, then rebuild (or `--cmake-args -DPython3_EXECUTABLE=/usr/bin/python3`) |
 | RViz `could not connect to display` | started over SSH: use `rviz:=false`, run RViz on a machine with a screen |
 | RViz loads someone else's robot | another project uses the same `ROS_DOMAIN_ID`: pick another number everywhere |
 | `ros2 service call` hangs on `waiting for service`, or prints `sequence size exceeds remaining buffer` | this terminal is on a different ROS setup than teleop (distro, `RMW_IMPLEMENTATION` or `ROS_DOMAIN_ID`). Compare with the running teleop: `tr '\0' '\n' < /proc/$(pgrep -n -f rebel_demo/teleop)/environ \| grep -E '^(ROS_\|RMW_)'`, set the same values, then `ros2 daemon stop` |
+| teleop log `holding: no TF arm_left_base_link <- rigid_body_N`, commands stay 0 although engaged | nobody publishes `/dual_arm/isaac_joint_states` (no Isaac in this `ROS_DOMAIN_ID`, or a real robot without a state publisher), so the rig's TF is split. Add `fake_state:=true` (states = commanded joints, others 0), or publish the real joint states there |
+| `TF_OLD_DATA ignoring data from the past ... at time 4.4` (all frames, all nodes) | two clocks or two publishers: Isaac's sim time mixed with PC time. With Isaac do not pass `use_sim_time:=false` / `fake_state:=true`; restart the launch after stopping or resetting Isaac; `ros2 topic info /dual_arm/isaac_joint_states -v` must show one publisher |
+| teleop and Isaac do not see each other | different `ROS_DOMAIN_ID` (Isaac with none = 0): export the same number in every terminal and in the shell that starts Isaac Sim |
 | `colcon build` makes `build/ install/ log/` inside `src/` | you ran it in the wrong folder: delete them, `cd ~/rebel_ws`, build again |
 | `No module named 'xacro'` at launch | `sudo apt install ros-$(ls /opt/ros)-xacro` |
-| `package 'igus_rebel_description' not found` | copy it into `src/` and rebuild (section 3) |
+| `package 'igus_rebel_description' not found` | copy it into `src/` if missing, then build it (`colcon build --packages-select igus_rebel_description`) and re-source `install/setup.bash` (section 3) |
 | RViz: `No transform from ... to world` for the arm links | nobody publishes the rig's joint states: Isaac not playing / bridge scripts not run (`ros2 topic hz /dual_arm/isaac_joint_states`), or in `target:=rviz` the `joint_merger` node died (see its traceback) |
 | `No package metadata was found for rebel_demo` | broken install from a failed build: `rm -rf build/rebel_demo install/rebel_demo`, rebuild |
 | robot does not move after engage | `ros2 run tf2_ros tf2_echo arm_left_base_link rigid_body_1` must change as you move; check `hand_frame` |

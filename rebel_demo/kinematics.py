@@ -36,11 +36,29 @@ LOWER = np.array([j[3] for j in JOINTS])
 UPPER = np.array([j[4] for j in JOINTS])
 VMAX = math.radians(45.0)                       # rad/s, every joint (URDF velocity limit)
 
-# "ready" pose: tool0 35 cm in front of the arm base and 30 cm above it, pointing straight down, elbow bent
-# (joint3 +88 deg). All-zero would be the arm straight up: a wrist singularity with the gripper at the ceiling.
-HOME = np.radians([0.0, 13.4, 87.9, 0.0, 78.7, 0.0])
-# for straight up
-# HOME = np.radians([0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+# HOME: all joints at 0 = the arm straight up (a wrist singularity, gripper at the ceiling).
+# Previous "ready" pose (tool0 35 cm in front of the base, 30 cm up, pointing down, elbow bent):
+# HOME = np.radians([0.0, 13.4, 87.9, 0.0, 78.7, 0.0])
+HOME = np.radians([0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+
+
+def parse_pose_deg(text):
+    """"0 0 100 0 50 0" (degrees, spaces or commas) -> 6 joint angles [rad]. Raises ValueError if it is not 6 numbers
+    or a joint is outside its limit."""
+    try:
+        vals = [float(v) for v in str(text).replace(",", " ").split()]
+    except ValueError as e:
+        raise ValueError(f"home_deg {text!r}: not numbers") from e
+    if len(vals) != 6:
+        raise ValueError(f"home_deg {text!r}: need 6 angles in degrees, got {len(vals)}")
+    q = np.radians(vals)
+    lo = LOWER.copy()
+    lo[2] = math.radians(-80)                       # robot limit; LOWER[2] is the 15 deg elbow-up bound of the IK
+    bad = [f"joint{i + 1}={vals[i]:g} (allowed {math.degrees(lo[i]):.0f}..{math.degrees(UPPER[i]):.0f})"
+           for i in range(6) if q[i] < lo[i] - 1e-9 or q[i] > UPPER[i] + 1e-9]
+    if bad:
+        raise ValueError(f"home_deg {text!r}: outside the joint limits: " + ", ".join(bad))
+    return q
 
 
 def rot(axis, a):
@@ -88,6 +106,36 @@ def fk(q):
     T[:3, :3] = R @ _FLANGE_R
     T[:3, 3] = p + R @ _FLANGE_P
     return T
+
+
+def scale_rotation(R, k):
+    """Rotation matrix R with its angle multiplied by k about the same axis (k = 1: R itself, k = 0: identity)."""
+    if k == 1.0:
+        return R
+    rv = _log_so3(R)                                # rotation vector = axis * angle
+    angle = float(np.linalg.norm(rv))
+    if angle < 1e-9:
+        return np.eye(3)
+    return rot(rv / angle, k * angle)
+
+
+def twist_about(R, axis):
+    """Signed angle [rad, [-pi, pi]] of rotation matrix R about the unit vector `axis` (swing-twist decomposition:
+    only the part of R that spins around `axis`; a tilt away from it contributes ~0)."""
+    t = np.trace(R)
+    if t > 0:                                       # rotation matrix -> quaternion (x, y, z, w), Shepperd's method
+        s = 2 * math.sqrt(t + 1)
+        v, w = np.array([R[2, 1] - R[1, 2], R[0, 2] - R[2, 0], R[1, 0] - R[0, 1]]) / s, s / 4
+    else:
+        i = int(np.argmax(np.diag(R)))
+        j, k = (i + 1) % 3, (i + 2) % 3
+        s = 2 * math.sqrt(1 + R[i, i] - R[j, j] - R[k, k])
+        v = np.zeros(3)
+        v[i], v[j], v[k] = s / 4, (R[j, i] + R[i, j]) / s, (R[k, i] + R[i, k]) / s
+        w = (R[k, j] - R[j, k]) / s
+    if w < 0:                                       # q and -q are the same rotation: keep the short way round
+        v, w = -v, -w
+    return 2.0 * math.atan2(float(np.dot(v, np.asarray(axis, float))), w)
 
 
 # ---------------------------------------------------------------- IK (damped least squares)
