@@ -17,6 +17,7 @@ Motive (Windows) --NatNet--> mocap4r2 OptiTrack driver --/rigid_bodies--> mocap_
 |---|---|
 | install everything on a new PC | [1. Install](#1-install) |
 | start teleop with a few commands | [Quick start](#quick-start) |
+| use a window instead of terminals | [2.7 The GUI](#27-the-gui-runsh-ui) |
 | drive the real robot / Isaac Sim | [2.2](#22-real-robot), [2.3](#23-isaac-sim) |
 | look up an argument, a topic or a limit | [Reference](#reference) |
 | fix an error message | [Troubleshooting](#troubleshooting) |
@@ -32,6 +33,8 @@ After the one-time [install](#1-install), `scripts/run.sh` does the sourcing (RO
 | 3 | `run.sh keyboard` | click this terminal to focus it; **SPACE** engages / pauses / resumes both arms, `l` / `r` one arm, `q` quits |
 | once | `run.sh calibrate` | hold both hands open while it runs; repeat after every restart of the launch |
 
+**Prefer a window?** `run.sh ui` replaces terminals 1-4 with one GUI ([2.7](#27-the-gui-runsh-ui)).
+
 `run.sh help` lists everything (`build`, `env` check, ...). Extra arguments override the defaults:
 `run.sh real scale_trans:=0.5 max_joint_speed_deg:=15`; another domain: `ROS_DOMAIN_ID=12 run.sh real`. Optional alias for
 `~/.bashrc`: `alias rebel='~/dual_arm_control/src/rebel_mocap_teleop/scripts/run.sh'` (then `rebel real`, `rebel keyboard`).
@@ -44,7 +47,7 @@ First run on a new robot or setup: `scale_trans:=0.5 max_joint_speed_deg:=15` an
 ### 1.1 Requirements
 - Ubuntu 22.04 with ROS 2 Humble (what this was developed and tested on), **one** ROS distribution only. The code is plain
   rclpy and should also run on Ubuntu 24.04 + Jazzy (not re-tested). Never mix distributions in terminals or workspaces.
-- `colcon`, `rosdep`, `xacro`, `numpy`; `robot_state_publisher`; `rviz2` (only for RViz); the robot model package
+- `colcon`, `rosdep`, `xacro`, `numpy`; `robot_state_publisher`; `rviz2` (only for RViz); `python3-pyqt5` (only for the GUI); the robot model package
   `igus_rebel_description` (below); Isaac Sim (only for simulation).
 - The mocap driver needs Linux (its NatNet library is Linux-only). RViz can run on another machine with this package built
   (same network, same `ROS_DOMAIN_ID`).
@@ -203,6 +206,29 @@ RViz only (no mocap, no Isaac): `ros2 launch rebel_demo teleop.launch.py target:
 to move it ([section 12](#12-testing-without-hardware)). Over SSH add `rviz:=false` and run RViz elsewhere:
 `rviz2 -d $(ros2 pkg prefix rebel_demo)/share/rebel_demo/rviz/rebel_demo.rviz`.
 
+### 2.7 The GUI (`run.sh ui`)
+One window instead of the driver, teleop, keyboard and calibrate terminals (needs a display; it works in your remote desktop):
+```bash
+~/dual_arm_control/src/rebel_mocap_teleop/scripts/run.sh ui          # ROS_DOMAIN_ID=12 run.sh ui for another domain
+```
+- **Start all** runs the sequence and waits for each step: driver running, driver activated, mocap frames arriving, robot side
+  ready (Isaac: `/clock` and joint states), teleop started, both arms at HOME. **Stop all** stops what the window started.
+  The buttons on the Control tab do the same steps one by one; a driver or teleop that was started in a terminal is
+  recognised and left alone.
+- **Status** lights: driver state, mocap rate and the streaming IDs Motive sends, robot side, teleop nodes, at HOME, hands
+  tracked (TF), engaged / paused, command rate and listeners. **What to do next** turns the live state into the fix for
+  the mistakes we ran into (driver inactive, no frames, no `/clock`, wrong ROS domain, a body that is not tracked, nobody
+  listening to the commands).
+- **Control:** the big button (or **SPACE**) pauses / resumes both arms, **L** / **R** one arm, **Home both**, **Calibrate
+  grippers** (hold both hands open; it calibrates 3 s after the click). The keys work whenever the window has focus, no
+  terminal needed; **Esc** leaves a text field. The 12 commanded joints are shown as bars with their limits (amber within
+  10 deg, red within 3 deg).
+- **Settings** hold everything of the launch line (robot side real / Isaac, arms, Motive IDs, scales, speed, orientation mode,
+  `home_deg`, robot frame rotation in degrees, workspace, extra arguments) as named **profiles**: *Real robot* and *Isaac
+  Sim* are built in (the best known settings, the same as `run.sh real` / `isaac`), your own are saved in
+  `~/.config/rebel_mocap_teleop/profiles.json`. The exact command is shown; changes apply the next time teleop is started.
+- Not done by the GUI: starting Isaac Sim and running its bridge scripts (do that as in [2.3](#23-isaac-sim)), and Motive.
+
 ---
 
 # Reference
@@ -326,11 +352,13 @@ close it; the jaws then move to the closed / open carriage position at `max_spee
 | `joint_merger` | all arm and gripper commands -> ONE `JointState` per cycle (Isaac keeps only the latest message, so separate messages would take turns) | `command_topic`, or the joint-state topic when `target:=rviz` |
 | `rig_state_fake` (a second `joint_merger`) | `fake_state:=true` only | `/dual_arm/isaac_joint_states` |
 | `teleop_keyboard` | SPACE / `l` / `r` -> `~/engage` of the teleop nodes | |
+| `rebel_ui` | the GUI of [2.7](#27-the-gui-runsh-ui): starts / stops the driver and teleop, status, engage / home / calibrate | calls the services above; subscribes to `/rigid_bodies`, `/clock`, the joint topics and TF |
 
 ```
 launch/teleop.launch.py        starts all of the above plus robot_state_publisher, the static TF map -> world and (RViz)
 rebel_demo/kinematics.py       rebel2 joint table (= igus_rebel2_arm_macro.xacro), FK, damped-least-squares IK, limits, twist / rotation scaling
 rebel_demo/*_node.py           the nodes above            scripts/run.sh   one-command launcher
+rebel_demo/gui_app.py, gui_logic.py   the GUI (Qt window) and its logic (profiles, commands, hints; unit-tested)
 rviz/                          RViz config                test/test_teleop.py   pure-python tests (python3 -m pytest test/)
 tools/fake_hand.py, fake_isaac.py   fake mocap / fake Isaac (section 12)       tools/make_low_poly_meshes.py   mesh decimation, one-off
 ```

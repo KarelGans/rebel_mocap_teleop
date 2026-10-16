@@ -24,6 +24,10 @@
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-pyqt5</exec_depend>
+  <exec_depend>lifecycle_msgs</exec_depend>
+  <exec_depend>rosgraph_msgs</exec_depend>
+  <exec_depend>mocap4r2_msgs</exec_depend>
   <!-- mocap4r2_msgs: from the mocap4ros2_optitrack workspace (needed by mocap_tf at run time) -->
 
   <test_depend>python3-pytest</test_depend>

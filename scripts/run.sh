@@ -4,6 +4,7 @@
 #
 #   real       teleop for the REAL robot, both arms (the "best known command" of the README)
 #   isaac      teleop for Isaac Sim, both arms (Isaac must be playing, started with the same ROS_DOMAIN_ID)
+#   ui         the GUI: start/stop driver + teleop, status lights, engage/pause buttons, settings profiles (SPACE pauses)
 #   keyboard   SPACE = pause/resume both arms, l / r = left / right arm only, q = quit (own terminal)
 #   calibrate  save the open-hand pose of both grippers (hold both hands open, launch must be running)
 #   driver     start the OptiTrack (mocap4r2) driver
@@ -20,7 +21,7 @@ WS="${WS:-$HOME/dual_arm_control}"
 MOCAP_WS="${MOCAP_WS:-$HOME/mocap_ws}"
 export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-11}"
 
-usage() { sed -n '2,17p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,/^[^#]/{/^#/p;}' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 cmd="${1:-}"
 [ -n "$cmd" ] || { usage; exit 1; }
@@ -59,6 +60,9 @@ case "$cmd" in
       right_hand_frame:=1 right_gripper_frame:=3 gripper_mode:=orientation \
       orientation:=semi max_joint_speed_deg:=45 workspace_max:="0.7 0.7 1.4" \
       robot_ypr:="1.5708 0 0" home_deg:="0 0 60 0 50 0" "$@"
+    ;;
+  ui)
+    exec ros2 run rebel_demo rebel_ui "$@"
     ;;
   keyboard)
     exec ros2 run rebel_demo teleop_keyboard --ros-args -p teleop:=/rebel_teleop_left,/rebel_teleop_right "$@"
