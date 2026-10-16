@@ -177,16 +177,19 @@ Do **not** add `use_sim_time:=false` or `fake_state:=true` here, and restart the
 At start each arm moves from its measured joints to `home_deg` at the joint speed limit; **engage is refused until `at HOME`
 is logged**. Engaging never moves the arm: the arm's pose and your hand's pose at that moment become the reference, and
 from then on `tool = reference + scale_trans x (hand movement)`.
+
+Use the keyboard (`run.sh keyboard`, its own terminal, keep it focused): **SPACE** pauses all arms if any runs, otherwise
+resumes all; `l` / `r` toggle only the left / right arm; `q` quits. Pausing releases the clutch: the robot holds, you
+reposition your hand, and on resume the robot's last pose and your hand's pose at that moment are the new reference (hand
+motion during the pause is ignored). The gripper is not affected. `/rebel_teleop*/engaged` (latched) shows the state.
+
+The keyboard calls the teleop services; you only need them to **go back to home** (no key for it), to set an explicit state,
+or without a keyboard (SSH, scripts). Node names `/rebel_teleop_left`, `_right`, or `/rebel_teleop` for one arm:
 ```bash
-ros2 service call /rebel_teleop_left/engage std_srvs/srv/SetBool "{data: true}"     # {data: false} releases the clutch
-ros2 service call /rebel_teleop_left/home   std_srvs/srv/Trigger                    # back to home_deg (disengages)
-ros2 service call /rebel_teleop_left/toggle std_srvs/srv/Trigger                    # pause <-> resume (no keyboard)
-ros2 run rebel_demo teleop_keyboard --ros-args -p teleop:=/rebel_teleop_left,/rebel_teleop_right    # run.sh keyboard
+ros2 service call /rebel_teleop_left/home   std_srvs/srv/Trigger                 # back to home_deg (disengages)
+ros2 service call /rebel_teleop_left/engage std_srvs/srv/SetBool "{data: true}"  # explicit state; {data: false} releases the clutch
+ros2 service call /rebel_teleop_left/toggle std_srvs/srv/Trigger                 # pause <-> resume
 ```
-Keyboard (own terminal, keep it focused): **SPACE** pauses all arms if any runs, otherwise resumes all; `l` / `r` toggle only
-the left / right arm; `q` quits. Pausing releases the clutch: the robot holds, you reposition your hand, and on resume the
-robot's last pose and your hand's pose at that moment are the new reference (hand motion during the pause is ignored).
-The gripper is not affected. `/rebel_teleop*/engaged` (latched) shows the state.
 
 ### 2.5 Align the robot with how you stand
 Moving your hand forward must move the tool forward, up must move it up.
