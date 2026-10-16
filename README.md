@@ -91,7 +91,7 @@ the name you give it in Motive does not matter. Defaults used by the launch file
 | palm (moves the arm) | 1 | `rigid_body_1` | `hand_frame` |
 | fingertip (opens / closes the gripper) | 2 | `rigid_body_2` | `gripper_frame` |
 
-Other IDs: pass them, e.g. `hand_frame:=rigid_body_5 gripper_frame:=rigid_body_6`. The `mocap_tf` log prints
+Other IDs: pass just the number, e.g. `hand_frame:=5 gripper_frame:=6` (the full TF name `rigid_body_5` also works). The `mocap_tf` log prints
 `new rigid body: map -> rigid_body_<ID>` for every rigid body it receives.
 
 ## 3. Build this package
@@ -191,10 +191,10 @@ ros2 lifecycle set /mocap4r2_optitrack_driver_node activate
 ros2 topic hz /rigid_bodies
 # terminal 3, RViz only, no Isaac (palm = rigid_body_1, fingertip = rigid_body_2)
 #   (add rviz:=false over SSH, then run RViz elsewhere)
-ros2 launch rebel_demo teleop.launch.py target:=rviz rig:=left hand_frame:=rigid_body_1 scale:=0.5 \
-  gripper_frame:=rigid_body_2 gripper_threshold:=0.08 gripper_hysteresis:=0.02 mesh_lod:=low
+ros2 launch rebel_demo teleop.launch.py target:=rviz rig:=left hand_frame:=1 scale:=0.5 \
+  gripper_frame:=2 gripper_threshold:=0.08 gripper_hysteresis:=0.02 mesh_lod:=low
 # terminal 3, Isaac Sim instead (Isaac playing, rig bridge scripts run, see section 5)
-ros2 launch rebel_demo teleop.launch.py target:=isaac rig:=left hand_frame:=rigid_body_1 rviz:=false \
+ros2 launch rebel_demo teleop.launch.py target:=isaac rig:=left hand_frame:=1 rviz:=false \
   scale:=1.0 cutoff_hz:=6.0
 # terminal 2: wait for "at HOME" in the launch log, then engage the clutch and move your hand slowly
 ros2 service call /rebel_teleop/engage std_srvs/srv/SetBool "{data: true}"
@@ -251,7 +251,7 @@ RViz on another machine: `rviz2 -d $(ros2 pkg prefix rebel_demo)/share/rebel_dem
 | argument | default | meaning |
 |---|---|---|
 | target | rviz | `rviz`: no Isaac, `joint_merger` publishes the rig's joint states; `isaac`: Isaac publishes them and gets the commands |
-| hand_frame | rigid_body_1 | TF frame of the hand = `rigid_body_` + Motive streaming ID (`rig:=left` / `right`) |
+| hand_frame | 1 | Motive **streaming ID** of the hand's rigid body (`rig:=left` / `right`). `2` and `rigid_body_2` are the same; the TF frame is `rigid_body_<ID>` |
 | scale_trans | 1.0 | hand-to-robot **translation** ratio (0.5 = finer). `scale` is the old name and still works as an alias; `scale_trans` wins if both are given |
 | scale_rot | 1.0 | hand-to-robot **rotation** ratio: with `orientation:=true` the wrist turns by `scale_rot` x your hand rotation since engage; with `orientation:=semi` joint 6 turns by `scale_rot` x your hand roll; unused with `orientation:=false` |
 | orientation | false | `false` position only (wrist free; joint 6 never moves) · `true` follow the full hand rotation (swings joints 4/6 near the straight-up singularity) · `semi` position only **plus joint 6 follows your hand's roll** about the tool axis (see below) |
@@ -267,16 +267,16 @@ RViz on another machine: `rviz2 -d $(ros2 pkg prefix rebel_demo)/share/rebel_dem
 | mesh_lod | low | `low` (decimated meshes) or `full` (CAD) |
 | lock_gripper | false | true = XEG joints fixed in the model (no gripper joints in RViz or commands) |
 | gripper | true | start the gripper node |
-| gripper_frame | rigid_body_2 | TF frame of the gripper-control rigid body (`rig:=left` / `right`) |
-| gripper_ref_frame | (hand_frame) | distance is measured to this frame |
+| gripper_frame | 2 | streaming ID of the gripper-control rigid body (`rig:=left` / `right`) |
+| gripper_ref_frame | (hand_frame) | streaming ID; the gripper distance is measured to this rigid body |
 | gripper_mode | distance | `distance` (palm <-> fingertip distance) or `orientation` (their relative rotation) |
 | gripper_open_angle / gripper_close_angle | 30 / 100 | orientation mode: open below / closed above this angle [deg] |
 | gripper_threshold | 0.08 | switching distance [m] palm <-> fingertip |
 | gripper_hysteresis | 0.02 | dead band [m] around the threshold |
 | gripper_invert | false | true = far closes, near opens |
 | rig | left | `left` / `right` = that arm of the dual-arm rig, the other holds its pose; `both` = both arms, two hands |
-| left_hand_frame / left_gripper_frame | rigid_body_1 / rigid_body_2 | `rig:=both`: left palm / fingertip |
-| right_hand_frame / right_gripper_frame | rigid_body_3 / rigid_body_4 | `rig:=both`: right palm / fingertip |
+| left_hand_frame / left_gripper_frame | 1 / 2 | `rig:=both`: streaming IDs of the left palm / fingertip |
+| right_hand_frame / right_gripper_frame | 3 / 4 | `rig:=both`: streaming IDs of the right palm / fingertip |
 | rig_xacro | dual_arm_rig_v2.urdf.xacro | rig model in `igus_rebel_description/urdf` |
 | use_sim_time | (auto) | `true` with `target:=isaac` (Isaac's `/clock`), else `false` |
 | joint_names | (auto) | 6 comma-separated arm joint names (base to wrist) if Isaac uses other names, e.g. `arm_left_join_1,...,arm_left_join_6`; default = `arm_<side>_joint1..6` |
@@ -318,8 +318,8 @@ in between, or tracking lost        -> keep the current state
 Motive rigid-body axes are arbitrary (set when each body was created), so hold your hand relaxed / open and call
 the calibration once; that pose then counts as 0 deg:
 ```bash
-ros2 launch rebel_demo teleop.launch.py rig:=left target:=isaac hand_frame:=rigid_body_1 \
-  gripper_frame:=rigid_body_2 gripper_mode:=orientation rviz:=false
+ros2 launch rebel_demo teleop.launch.py rig:=left target:=isaac hand_frame:=1 \
+  gripper_frame:=2 gripper_mode:=orientation rviz:=false
 ros2 service call /rebel_gripper/calibrate std_srvs/srv/Trigger
 ros2 topic echo /rebel_gripper/angle_deg     # tune gripper_open_angle / gripper_close_angle with this
 ```
@@ -343,7 +343,7 @@ for script in scripts:
 The bridge script subscribes to `/dual_arm/isaac_joint_commands` and publishes `/dual_arm/isaac_joint_states` and
 `/clock`. Then teleop **one** arm (`rig:=left` or `rig:=right`); the other arm holds its pose:
 ```bash
-ros2 launch rebel_demo teleop.launch.py target:=isaac rig:=left hand_frame:=rigid_body_1 rviz:=false \
+ros2 launch rebel_demo teleop.launch.py target:=isaac rig:=left hand_frame:=1 rviz:=false \
   scale:=1.0 cutoff_hz:=6.0
 ```
 `rig:=left` sets: joints `arm_left_joint1..6`, IK base frame `arm_left_base_link`, gripper joints
@@ -371,13 +371,13 @@ Four rigid bodies: a palm and a fingertip per hand. Defaults (change them to you
 
 | | palm (moves the arm) | fingertip (gripper) |
 |---|---|---|
-| left arm | `left_hand_frame:=rigid_body_1` | `left_gripper_frame:=rigid_body_2` |
-| right arm | `right_hand_frame:=rigid_body_3` | `right_gripper_frame:=rigid_body_4` |
+| left arm | `left_hand_frame:=1` | `left_gripper_frame:=2` |
+| right arm | `right_hand_frame:=3` | `right_gripper_frame:=4` |
 
 ```bash
 ros2 launch rebel_demo teleop.launch.py target:=isaac rig:=both rviz:=false scale:=1.0 cutoff_hz:=6.0 \
-  left_hand_frame:=rigid_body_1 left_gripper_frame:=rigid_body_2 \
-  right_hand_frame:=rigid_body_3 right_gripper_frame:=rigid_body_4
+  left_hand_frame:=1 left_gripper_frame:=2 \
+  right_hand_frame:=3 right_gripper_frame:=4
 # wait for "at HOME" from both arms, then engage each arm separately (or both):
 ros2 service call /rebel_teleop_left/engage std_srvs/srv/SetBool "{data: true}"
 ros2 service call /rebel_teleop_right/engage std_srvs/srv/SetBool "{data: true}"
@@ -398,8 +398,8 @@ export ROS_DOMAIN_ID=11
 source ~/mocap_ws/install/setup.bash
 source ~/dual_arm_control/install/setup.bash
 ros2 launch rebel_demo teleop.launch.py target:=isaac rig:=both rviz:=false scale:=1.0 cutoff_hz:=8.0 \
-  left_hand_frame:=rigid_body_2 left_gripper_frame:=rigid_body_4 \
-  right_hand_frame:=rigid_body_1 right_gripper_frame:=rigid_body_3 gripper_mode:=orientation \
+  left_hand_frame:=2 left_gripper_frame:=4 \
+  right_hand_frame:=1 right_gripper_frame:=3 gripper_mode:=orientation \
   orientation:=semi max_joint_speed_deg:=45 workspace_max:="0.7 0.7 1.4" \
   home_deg:="0 0 100 0 50 0"
 ```
@@ -491,8 +491,8 @@ source ~/mocap_ws/install/setup.bash
 source ~/dual_arm_control/install/setup.bash
 # robot powered up at all zeros (straight up); no joint states from it, so fake_state; it ramps to home_deg first
 ros2 launch rebel_demo teleop.launch.py target:=isaac rig:=both rviz:=false scale:=0.5 cutoff_hz:=6.0 \
-  left_hand_frame:=rigid_body_2 left_gripper_frame:=rigid_body_4 \
-  right_hand_frame:=rigid_body_1 right_gripper_frame:=rigid_body_3 gripper_mode:=orientation \
+  left_hand_frame:=2 left_gripper_frame:=4 \
+  right_hand_frame:=1 right_gripper_frame:=3 gripper_mode:=orientation \
   orientation:=semi max_joint_speed_deg:=15 workspace_max:="0.7 0.7 1.4" \
   use_sim_time:=false fake_state:=true home_deg:="0 0 100 0 50 0"
 # robot already AT the pose you want (no start move): drop home_deg and add skip_home:=true instead
@@ -510,13 +510,13 @@ export ROS_DOMAIN_ID=11
 source ~/mocap_ws/install/setup.bash
 source ~/dual_arm_control/install/setup.bash
 ros2 launch rebel_demo teleop.launch.py target:=isaac rig:=both rviz:=false scale:=1.0 cutoff_hz:=6.0 \
-  left_hand_frame:=rigid_body_2 left_gripper_frame:=rigid_body_4 \
-  right_hand_frame:=rigid_body_1 right_gripper_frame:=rigid_body_3 gripper_mode:=orientation \
+  left_hand_frame:=2 left_gripper_frame:=4 \
+  right_hand_frame:=1 right_gripper_frame:=3 gripper_mode:=orientation \
   orientation:=semi max_joint_speed_deg:=45 workspace_max:="0.7 0.7 1.4" \
   robot_ypr:="1.5708 0 0" home_deg:="0 0 60 0 50 0" \
   use_sim_time:=false fake_state:=true
 ```
-Same line without the backslashes: `ros2 launch rebel_demo teleop.launch.py target:=isaac rig:=both rviz:=false scale:=1.0 cutoff_hz:=6.0 left_hand_frame:=rigid_body_2 left_gripper_frame:=rigid_body_4 right_hand_frame:=rigid_body_1 right_gripper_frame:=rigid_body_3 gripper_mode:=orientation orientation:=semi max_joint_speed_deg:=45 workspace_max:="0.7 0.7 1.4" robot_ypr:="1.5708 0 0" home_deg:="0 0 60 0 50 0" use_sim_time:=false fake_state:=true`
+Same line without the backslashes: `ros2 launch rebel_demo teleop.launch.py target:=isaac rig:=both rviz:=false scale:=1.0 cutoff_hz:=6.0 left_hand_frame:=2 left_gripper_frame:=4 right_hand_frame:=1 right_gripper_frame:=3 gripper_mode:=orientation orientation:=semi max_joint_speed_deg:=45 workspace_max:="0.7 0.7 1.4" robot_ypr:="1.5708 0 0" home_deg:="0 0 60 0 50 0" use_sim_time:=false fake_state:=true`
 - `robot_ypr:="1.5708 0 0"` turns the robot frame 90 deg about the vertical axis so "forward" matches how you stand
   (flip the sign if it goes the wrong way); `home_deg` is the start pose of both arms (joints 1-6, degrees).
 - Always put the quotes around values with spaces, and keep the whole command on one logical line (`\` at the line ends).

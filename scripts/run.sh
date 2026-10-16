@@ -46,8 +46,8 @@ echo "[run.sh] $cmd | ROS_DOMAIN_ID=$ROS_DOMAIN_ID | workspace $WS" >&2
 case "$cmd" in
   real)
     exec ros2 launch rebel_demo teleop.launch.py target:=isaac rig:=both rviz:=false scale:=1.0 cutoff_hz:=6.0 \
-      left_hand_frame:=rigid_body_2 left_gripper_frame:=rigid_body_4 \
-      right_hand_frame:=rigid_body_1 right_gripper_frame:=rigid_body_3 gripper_mode:=orientation \
+      left_hand_frame:=2 left_gripper_frame:=4 \
+      right_hand_frame:=1 right_gripper_frame:=3 gripper_mode:=orientation \
       orientation:=semi max_joint_speed_deg:=45 workspace_max:="0.7 0.7 1.4" \
       robot_ypr:="1.5708 0 0" home_deg:="0 0 60 0 50 0" \
       use_sim_time:=false fake_state:=true "$@"
@@ -55,8 +55,8 @@ case "$cmd" in
   isaac)
     # no use_sim_time / fake_state: Isaac's bridge provides /clock and the joint states
     exec ros2 launch rebel_demo teleop.launch.py target:=isaac rig:=both rviz:=false scale:=1.0 cutoff_hz:=6.0 \
-      left_hand_frame:=rigid_body_2 left_gripper_frame:=rigid_body_4 \
-      right_hand_frame:=rigid_body_1 right_gripper_frame:=rigid_body_3 gripper_mode:=orientation \
+      left_hand_frame:=2 left_gripper_frame:=4 \
+      right_hand_frame:=1 right_gripper_frame:=3 gripper_mode:=orientation \
       orientation:=semi max_joint_speed_deg:=45 workspace_max:="0.7 0.7 1.4" \
       robot_ypr:="1.5708 0 0" home_deg:="0 0 60 0 50 0" "$@"
     ;;

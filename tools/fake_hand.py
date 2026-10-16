@@ -111,9 +111,10 @@ def main():
                     help="close the gripper by rotating the fingertip body 150 deg (gripper_mode:=orientation) "
                          "instead of moving it closer")
     ap.add_argument("--sim-time", action="store_true", help="use Isaac's /clock (target:=isaac)")
-    ap.add_argument("--palm", default="rigid_body_1", help="one arm: palm rigid body")
-    ap.add_argument("--finger", default="rigid_body_2", help="one arm: fingertip rigid body")
+    ap.add_argument("--palm", default="1", help="one arm: palm rigid body (streaming ID, or a full frame name)")
+    ap.add_argument("--finger", default="2", help="one arm: fingertip rigid body (streaming ID, or a full frame name)")
     args = ap.parse_args()
+    args.palm, args.finger = (f"rigid_body_{v}" if v.isdigit() else v for v in (args.palm, args.finger))
     if args.unstable:
         args.jitter = 0.002 if args.jitter is None else args.jitter
         args.dropouts, args.freezes, args.outliers = args.dropouts or 0.3, args.freezes or 0.15, args.outliers or 0.5
