@@ -4,12 +4,12 @@ Pipeline, every cycle (default 60 Hz):
   1. TF lookup  base_frame <- hand_frame          (hand pose in the robot base frame)
   2. tracking check: missing / stale / frozen pose -> HOLD (robot keeps its last command)
   3. LOW-PASS filter on the hand pose            (position: 1st-order; orientation: slerp)
-  4. clutch + mapping: relative (default) or absolute, scale, workspace clamp
+  4. clutch + mapping: relative (the hand moves the tool by the same amount x scale), workspace clamp
   5. real-time IK  target flange pose -> 6 joint angles, seeded with the last command
   6. joint speed limit                            (max_joint_speed_deg per joint)
   7. publish sensor_msgs/JointState on command_topic (/dual_arm/isaac_joint_commands for the Isaac rig)
 
-Clutch (relative mode): call the service  ~/engage  (std_srvs/SetBool)
+Clutch : call the service  ~/engage  (std_srvs/SetBool)
   ros2 service call /rebel_teleop/engage std_srvs/srv/SetBool "{data: true}"    # start following
   ros2 service call /rebel_teleop/engage std_srvs/srv/SetBool "{data: false}"   # stop, reposition hand
   ros2 service call /rebel_teleop/toggle std_srvs/srv/Trigger                     # pause <-> resume
@@ -22,10 +22,10 @@ While engaged:  robot_target = robot_pose_at_engage + scale_trans * (hand_now - 
 
 Parameters (defaults in brackets)
   base_frame [arm_left_base_link]  hand_frame [HAND]          TF frames (hand = rigid body name in mocap config)
-  rate_hz [60]            mode [relative]            relative | absolute
-  scale_trans [1.0]       gain on the hand's translation since engage (relative mode); `scale` is an alias
+  rate_hz [60]
+  scale_trans [1.0]       gain on the hand's translation since engage; `scale` is an alias
   scale_rot [1.0]         gain on the hand's rotation since engage: the wrist rotation with orientation:=true, the joint 6
-                          roll with orientation:=semi (relative mode; unused with orientation:=false)
+                          roll with orientation:=semi (unused with orientation:=false)
   orientation [false]     false = position only (wrist free), true = full pose
   roll_follow [false]     position only + joint 6 follows the hand's roll about the tool axis (launch: orientation:=semi)
   roll_sign [1.0]         joint6 = joint6 at engage + sign * scale_rot * hand twist; sign -1 flips the direction
@@ -128,7 +128,6 @@ class Teleop(Node):
         self.base_frame = d("base_frame", "arm_left_base_link").value
         self.hand_frame = d("hand_frame", "HAND").value
         self.rate = float(d("rate_hz", 60.0).value)
-        self.mode = d("mode", "relative").value
         scale_alias = float(d("scale", 1.0).value)                        # old name of scale_trans
         self.scale_trans = float(d("scale_trans", scale_alias).value)
         self.scale_rot = float(d("scale_rot", 1.0).value)
@@ -151,7 +150,7 @@ class Teleop(Node):
         self.home_wait = float(d("home_wait", 1.0).value)
         self.skip_home = bool(d("skip_home", False).value)
         self.home = parse_pose_deg(d("home_deg", "0 0 0 0 0 0").value)    # HOME [rad]; raises on bad input
-        self.engaged = bool(d("start_engaged", self.mode == "absolute").value)
+        self.engaged = bool(d("start_engaged", False).value)
         topic = d("command_topic", "/dual_arm/isaac_joint_commands").value
         self.pub_js = bool(d("publish_joint_states", False).value)
         self.use_feedback = bool(d("feedback_from_joint_states", False).value)
@@ -190,7 +189,7 @@ class Teleop(Node):
         self.dt = 1.0 / self.rate
         self.create_timer(self.dt, self.step)
         self.get_logger().info(
-            f"teleop: {self.hand_frame} -> {self.base_frame} ({self.joint_names[0]}..), mode={self.mode}, "
+            f"teleop: {self.hand_frame} -> {self.base_frame} ({self.joint_names[0]}..), "
             f"{'full pose' if self.use_orientation else 'position + joint6 roll' if self.roll_follow else 'position only'}"
             f", {self.rate:.0f} Hz -> {topic}"
             + ("" if self.engaged else "  (NOT engaged: call ~/engage true, or press SPACE in teleop_keyboard)"))
@@ -324,25 +323,20 @@ class Teleop(Node):
             self.publish(self.q_cmd)
             return
         # 4. mapping
-        if self.mode == "relative":
-            if self.hand_ref is None:                      # anchor: hand now <-> robot now
-                self.hand_ref = (p_f.copy(), R_f.copy())
-                self.robot_ref = fk(self.q_cmd)
-                self.roll_axis = self.robot_ref[:3, 2].copy()      # tool0 z = joint6 axis, base frame
-                self.q6_ref, self.twist_prev, self.twist_acc = float(self.q_cmd[5]), 0.0, 0.0
-                self.get_logger().info("anchored: tool at (%.3f, %.3f, %.3f) m <-> hand at (%.3f, %.3f, %.3f) m"
-                                       % (*self.robot_ref[:3, 3], *p_f))
-            T = self.robot_ref.copy()
-            T[:3, 3] = self.robot_ref[:3, 3] + self.scale_trans * (p_f - self.hand_ref[0])
-            if self.use_orientation:
-                T[:3, :3] = scale_rotation(R_f @ self.hand_ref[1].T, self.scale_rot) @ self.robot_ref[:3, :3]
-        else:                                               # absolute: flange = hand pose
-            T = np.eye(4)
-            T[:3, :3], T[:3, 3] = R_f, p_f
+        if self.hand_ref is None:                          # anchor: hand now <-> robot now
+            self.hand_ref = (p_f.copy(), R_f.copy())
+            self.robot_ref = fk(self.q_cmd)
+            self.roll_axis = self.robot_ref[:3, 2].copy()          # tool0 z = joint6 axis, base frame
+            self.q6_ref, self.twist_prev, self.twist_acc = float(self.q_cmd[5]), 0.0, 0.0
+            self.get_logger().info("anchored: tool at (%.3f, %.3f, %.3f) m <-> hand at (%.3f, %.3f, %.3f) m"
+                                   % (*self.robot_ref[:3, 3], *p_f))
+        T = self.robot_ref.copy()
+        T[:3, 3] = self.robot_ref[:3, 3] + self.scale_trans * (p_f - self.hand_ref[0])
+        if self.use_orientation:
+            T[:3, :3] = scale_rotation(R_f @ self.hand_ref[1].T, self.scale_rot) @ self.robot_ref[:3, :3]
         # workspace box, widened to contain the anchor pose: engaging never moves the robot
         lo, hi = self.ws_min, self.ws_max
-        if self.mode == "relative":
-            lo, hi = np.minimum(lo, self.robot_ref[:3, 3]), np.maximum(hi, self.robot_ref[:3, 3])
+        lo, hi = np.minimum(lo, self.robot_ref[:3, 3]), np.maximum(hi, self.robot_ref[:3, 3])
         wanted = T[:3, 3].copy()
         T[:3, 3] = np.clip(wanted, lo, hi)
         beyond = wanted - T[:3, 3]                         # > 0: past the max, < 0: past the min
@@ -364,11 +358,11 @@ class Teleop(Node):
         # 5. real-time IK, warm-started from the last command
         w_rot = 0.3 if self.use_orientation else 0.0
         q_rest = None if self.use_orientation else self.home
-        if self.roll_follow and self.mode == "relative" and self.roll_axis is not None:
+        if self.roll_follow and self.roll_axis is not None:
             q_rest = self.home.copy()
             q_rest[5] = seed[5]                            # no pull of joint 6 towards HOME: the hand roll owns it
         q_ik, pe, re = ik(T, seed, w_rot=w_rot, iters=25, q_rest=q_rest)
-        if self.roll_follow and self.mode == "relative" and self.roll_axis is not None:
+        if self.roll_follow and self.roll_axis is not None:
             # joint 6 spins about the tool axis, so it cannot change the tool position: drive it directly from the
             # twist of the hand about that axis (tilts of the hand contribute ~0), continuous across +-180 deg
             twist = twist_about(R_f @ self.hand_ref[1].T, self.roll_axis)

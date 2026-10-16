@@ -4,7 +4,6 @@ Your hand (an OptiTrack rigid body) drives an igus ReBeL 6-DoF (rebel2) arm of t
 time, and a second rigid body opens / closes its HIWIN XEG-32 gripper. One arm (`rig:=left` or `right`) or both
 arms with two hands (`rig:=both`). The hand pose is filtered, converted to joint angles with IK at 60 Hz, and sent
 to Isaac Sim as one `sensor_msgs/JointState` (`/dual_arm/isaac_joint_commands`); RViz shows the same rig model.
-Demonstrations can be recorded as a GR00T / LeRobot v2 dataset.
 
 ```
 Motive (Windows) --NatNet--> mocap4r2 OptiTrack driver --/rigid_bodies-->
@@ -14,7 +13,6 @@ Motive (Windows) --NatNet--> mocap4r2 OptiTrack driver --/rigid_bodies-->
     joint_merger (all arms + grippers in ONE message)
   --> /dual_arm/isaac_joint_commands -> Isaac Sim (rig bridge scripts)
   /dual_arm/isaac_joint_states (from Isaac) -> robot_state_publisher -> RViz
-  recorder: joints + gripper + camera images -> GR00T / LeRobot v2 dataset
 ```
 
 ## Contents
@@ -24,8 +22,6 @@ rebel_demo/
   rebel_demo/mocap_tf_node.py  node "mocap_tf": mocap4r2 /rigid_bodies -> TF (map -> rigid_body_<id>)
   rebel_demo/teleop_node.py    node "teleop":   hand TF -> low-pass -> clutch/scale -> IK -> speed limit -> JointState
   rebel_demo/gripper_node.py   node "gripper":  distance between two rigid bodies -> XEG-32 open (1) / closed (0)
-  rebel_demo/recorder_node.py  node "recorder": joints + gripper + images -> GR00T / LeRobot v2 dataset
-  rebel_demo/lerobot_writer.py dataset writer used by the recorder (parquet + H.264 mp4 + meta)
   rebel_demo/joint_merger_node.py  node "joint_merger": all arm / gripper commands -> ONE JointState per cycle
   rebel_demo/keyboard_node.py  node "teleop_keyboard": SPACE pauses / resumes the arm(s)
   launch/teleop.launch.py      starts mocap_tf, teleop + gripper per arm, joint_merger, robot_state_publisher, static TF, (RViz)
@@ -51,7 +47,7 @@ in `kinematics.py` (elbow-up bound, see "How teleop works"). `mesh_lod:=low` (de
   Ubuntu 22.04 + Humble, or Ubuntu 24.04 + Jazzy. The code is plain rclpy and works on both.
   The commands below detect it with `$(ls /opt/ros)` (works when exactly one distribution is installed).
   Never mix two distributions (in terminals, workspaces or Isaac Sim).
-- Python: numpy. The recorder also needs `pyarrow` (`pip install pyarrow`) and the `ffmpeg` binary.
+- Python: numpy.
 - ROS packages: `xacro`, `robot_state_publisher`, `rviz2`, and `igus_rebel_description` (section 3).
 - RViz can run on the same Linux PC (needs a screen) or on another machine (e.g. a Mac with RoboStack)
   that has this package built, same network, same `ROS_DOMAIN_ID`.
@@ -119,8 +115,7 @@ cd ~/dual_arm_control
 source /opt/ros/$(ls /opt/ros)/setup.bash
 rosdep install --from-paths src --ignore-src -r -y \
   --skip-keys "topic_based_ros2_control gz_ros2_control ros_gz_bridge"   # igus_rebel_description extras, not needed here
-sudo apt install -y ffmpeg ros-$(ls /opt/ros)-joint-state-publisher-gui
-pip install pyarrow                                                         # recorder only
+sudo apt install -y ros-$(ls /opt/ros)-joint-state-publisher-gui
 colcon build --symlink-install
 source install/setup.bash
 ```
@@ -157,7 +152,7 @@ Without `--symlink-install`, rebuild after every edit.
   setuptools >= 80. Either build without it (`colcon build`), or `pip install "setuptools<80"` first.
 - After a failed symlink build, a plain build fails with `option --uninstall not recognized`.
   Delete the leftovers and rebuild: `rm -rf build/rebel_demo install/rebel_demo && colcon build`
-- Install into the env: `conda install -c robostack-jazzy -c conda-forge ros-jazzy-xacro ros-jazzy-joint-state-publisher-gui ffmpeg pyarrow`
+- Install into the env: `conda install -c robostack-jazzy -c conda-forge ros-jazzy-xacro ros-jazzy-joint-state-publisher-gui`
 - Workspace on this Mac: `~/Downloads/rebel_teleop_ws` (use it instead of `~/dual_arm_control`).
 
 Add the environment to `~/.bashrc` once (every terminal must have the **same** values — and the terminal that
@@ -177,7 +172,7 @@ After changing any of these later, restart every ROS program (driver, teleop, Is
 `ros2 daemon stop`: running programs keep their old values.
 
 ## 4. Run
-**Every terminal** (driver, launch, `ros2 service call`, keyboard, recorder) must have both workspaces sourced,
+**Every terminal** (driver, launch, `ros2 service call`, keyboard) must have both workspaces sourced,
 mocap first. Without the `~/.bashrc` lines from section 3, run in each new terminal:
 ```bash
 source /opt/ros/$(ls /opt/ros)/setup.bash
@@ -257,9 +252,8 @@ RViz on another machine: `rviz2 -d $(ros2 pkg prefix rebel_demo)/share/rebel_dem
 |---|---|---|
 | target | rviz | `rviz`: no Isaac, `joint_merger` publishes the rig's joint states; `isaac`: Isaac publishes them and gets the commands |
 | hand_frame | rigid_body_1 | TF frame of the hand = `rigid_body_` + Motive streaming ID (`rig:=left` / `right`) |
-| mode | relative | `relative` (clutch) or `absolute` (flange goes to the hand pose) |
 | scale_trans | 1.0 | hand-to-robot **translation** ratio (0.5 = finer). `scale` is the old name and still works as an alias; `scale_trans` wins if both are given |
-| scale_rot | 1.0 | hand-to-robot **rotation** ratio, relative mode: with `orientation:=true` the wrist turns by `scale_rot` x your hand rotation since engage; with `orientation:=semi` joint 6 turns by `scale_rot` x your hand roll; unused with `orientation:=false` |
+| scale_rot | 1.0 | hand-to-robot **rotation** ratio: with `orientation:=true` the wrist turns by `scale_rot` x your hand rotation since engage; with `orientation:=semi` joint 6 turns by `scale_rot` x your hand roll; unused with `orientation:=false` |
 | orientation | false | `false` position only (wrist free; joint 6 never moves) · `true` follow the full hand rotation (swings joints 4/6 near the straight-up singularity) · `semi` position only **plus joint 6 follows your hand's roll** about the tool axis (see below) |
 | home_deg | `0 0 0 0 0 0` | start pose of every arm, 6 joint angles in degrees (e.g. `"0 0 100 0 50 0"`): the arm moves there at start, and the IK's posture preference pulls towards it. Must be inside the joint limits (checked at startup) |
 | roll_sign | 1.0 | `orientation:=semi`: `-1` flips the joint 6 direction (the roll gain is `scale_rot`) |
@@ -335,30 +329,6 @@ rigidly fixed to your hand and only flip the finger body to close. The 0.1 s deb
 Topics: `/rebel_gripper/state` (0/1), `/rebel_gripper/opening_mm`. The jaw positions go to `joint_merger` together
 with the arm joints. Node parameters: `joint_prefix` (set by the launch: `arm_left_xeg32_` / `arm_right_xeg32_`),
 `closed_pos` / `open_pos` (carriage values [m], default = model joint limits).
-
-## Recording a dataset (GR00T / LeRobot v2)
-```bash
-ros2 run rebel_demo recorder --ros-args -p use_sim_time:=true -p arms:=left \
-  -p cameras:="wrist:/dual_arm/wrist_left/rgb/image_raw,top:/dual_arm/gemini336L/rgb/image_raw" -p image_size:="[320,240]"
-ros2 param set /rebel_recorder task "pick up the red cube and put it in the box"
-ros2 service call /rebel_recorder/start std_srvs/srv/Trigger     # /stop saves, /discard throws it away
-```
-`arms:=left` (default), `right`, or `left,right` for both arms (see "Both arms"). Joint states are read from
-`/dual_arm/isaac_joint_states` and commands from `/dual_arm/isaac_joint_commands` (parameters `joint_states_topic`,
-`command_topic`); cameras are the rig bridge topics (list them with `ros2 topic list | grep -i rgb`).
-Each frame (default 30 fps): `observation.state` = 6 joints measured (rad) + gripper measured (0..1),
-`action` = 6 joints commanded (rad) + gripper command (0/1), `observation.images.<cam>` = one H.264 mp4 per
-camera per episode, plus the task text. Frames are skipped while any input is older than `max_age` (0.5 s).
-Output (default `~/rebel_datasets/rebel_xeg32`, appended to across runs):
-```
-meta/info.json  episodes.jsonl  tasks.jsonl  modality.json     (one arm: single_arm 0:6, gripper 6:7)
-data/chunk-000/episode_000000.parquet
-videos/chunk-000/observation.images.<cam>/episode_000000.mp4
-```
-Cameras come from Isaac Sim (ROS2 camera publishers, 8-bit encodings rgb8/bgr8/rgba8/bgra8/mono8).
-For GR00T fine-tuning, define a new-embodiment data config using `single_arm` and `gripper`
-(two arms: `left_arm`, `left_gripper`, `right_arm`, `right_gripper`).
-Use a separate `dataset_dir` for one-arm and two-arm recordings: their state / action vectors differ.
 
 ## 5. Isaac Sim (dual-arm rig)
 In Isaac's Script Editor (stage loaded, timeline **stopped**), run the rig's three scripts, then press Play. Adjust
@@ -439,14 +409,6 @@ ros2 launch rebel_demo teleop.launch.py target:=isaac rig:=both rviz:=false scal
 - `orientation:=semi`: position-only arm (joints 1-5 as `orientation:=false`), joint 6 follows your hand's roll;
   `roll_sign:=-1` flips it, `scale_rot:=0.5` halves it. For first tests on a robot add `scale:=0.5 max_joint_speed_deg:=15`.
 - Slow movement: lower `max_joint_speed_deg` / `scale` are the cause; the defaults are 45 / 1.0.
-
-Record both arms (14 values per frame: left arm 6 + left gripper + right arm 6 + right gripper; `modality.json`
-parts `left_arm`, `left_gripper`, `right_arm`, `right_gripper`):
-```bash
-ros2 run rebel_demo recorder --ros-args -p use_sim_time:=true -p arms:=left,right \
-  -p cameras:="top:/dual_arm/gemini336L/rgb/image_raw,wrist_left:/dual_arm/wrist_left/rgb/image_raw,wrist_right:/dual_arm/wrist_right/rgb/image_raw" \
-  -p image_size:="[320,240]"
-```
 
 ## 6. Test without mocap / without Isaac (fake data)
 `tools/fake_hand.py` is a fake teleop data stream: it publishes the palm and fingertip rigid bodies at 120 Hz (like
