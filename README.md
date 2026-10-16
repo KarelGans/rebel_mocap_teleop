@@ -535,6 +535,13 @@ ros2 launch rebel_demo teleop.launch.py target:=isaac rig:=both rviz:=false scal
   use_sim_time:=false fake_state:=true home_deg:="0 0 100 0 50 0"
 # robot already AT the pose you want (no start move): drop home_deg and add skip_home:=true instead
 ```
+**Shortcut:** `scripts/run.sh` does the sourcing (ROS, mocap workspace, this workspace; domain 11) and runs these commands for you,
+from any folder: `real` (the command below), `isaac`, `keyboard`, `calibrate`, `driver`, `activate`, `build`, `env`. Extra arguments
+override the defaults (`run.sh real scale:=0.5 max_joint_speed_deg:=15`), and `ROS_DOMAIN_ID=12 run.sh real` changes the domain.
+```bash
+~/dual_arm_control/src/rebel_mocap_teleop/scripts/run.sh real
+```
+
 **Best known command so far (real robot, both arms)** - tuned on the real setup; start from this one:
 ```bash
 export ROS_DOMAIN_ID=11
@@ -572,6 +579,22 @@ ros2 topic pub -r 10 /dual_arm/isaac_joint_commands sensor_msgs/msg/JointState \
 Safety: there is no collision checking. Use `scale:=0.5 max_joint_speed_deg:=15` first, keep the e-stop in reach, and
 check the receiver's joint limits and zero positions match the rig model (joint2 -80..140 deg, joint3 -80..140 deg,
 joint5 +-95 deg, others +-179 deg; teleop also keeps joint3 >= 15 deg).
+
+## Quick start with `scripts/run.sh` (real robot or Isaac Sim)
+`scripts/run.sh` sources ROS, the mocap workspace and this workspace (domain 11 by default), removes conda from `PATH`, and runs
+the command. Run it by its path from any folder (`chmod +x scripts/run.sh` once if it says "Permission denied"). Terminals, in order:
+
+| Terminal | Command | Notes |
+|---|---|---|
+| 1 | `~/dual_arm_control/src/rebel_mocap_teleop/scripts/run.sh driver` | OptiTrack driver; wait for `Configured!`, then (any terminal) `... run.sh activate` |
+| 2 | `... run.sh real` (or `... run.sh isaac`) | wait for `at HOME` from both arms; keep it open. Isaac: start it from a shell with the same `ROS_DOMAIN_ID` and press Play first |
+| 3 | `... run.sh keyboard` | click this terminal to focus it; SPACE engages / pauses / resumes both arms, `l` / `r` toggles one arm, `q` quits |
+| once | `... run.sh calibrate` | hold both hands open while it runs; repeat after every restart of the launch |
+
+The robot's own driver (the node that reads `/dual_arm/isaac_joint_commands`) must be running too. Extra arguments override the
+defaults: `run.sh real scale:=0.5 max_joint_speed_deg:=15`. A shorter alias for `~/.bashrc`:
+`alias rebel='~/dual_arm_control/src/rebel_mocap_teleop/scripts/run.sh'` (then `rebel driver`, `rebel real`, `rebel keyboard`, ...).
+`run.sh help` lists all commands; `run.sh env` checks that ROS, `rebel_demo` and `mocap4r2_msgs` are found.
 
 ## Troubleshooting
 | symptom | fix |
