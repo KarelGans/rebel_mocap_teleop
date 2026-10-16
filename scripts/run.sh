@@ -12,7 +12,7 @@
 #   env        only print what would be sourced (checks the setup)
 #
 # Extra arguments are appended to the launch line and override the defaults, e.g.
-#   run.sh real scale:=0.5 max_joint_speed_deg:=15
+#   run.sh real scale_trans:=0.5 max_joint_speed_deg:=15
 # Settings by environment variable: ROS_DOMAIN_ID (default 11), WS (default ~/dual_arm_control), MOCAP_WS.
 set -eo pipefail
 
@@ -45,7 +45,7 @@ echo "[run.sh] $cmd | ROS_DOMAIN_ID=$ROS_DOMAIN_ID | workspace $WS" >&2
 
 case "$cmd" in
   real)
-    exec ros2 launch rebel_demo teleop.launch.py target:=isaac rig:=both rviz:=false scale:=1.0 cutoff_hz:=6.0 \
+    exec ros2 launch rebel_demo teleop.launch.py target:=isaac rig:=both rviz:=false scale_trans:=1.0 cutoff_hz:=6.0 \
       left_hand_frame:=2 left_gripper_frame:=4 \
       right_hand_frame:=1 right_gripper_frame:=3 gripper_mode:=orientation \
       orientation:=semi max_joint_speed_deg:=45 workspace_max:="0.7 0.7 1.4" \
@@ -54,7 +54,7 @@ case "$cmd" in
     ;;
   isaac)
     # no use_sim_time / fake_state: Isaac's bridge provides /clock and the joint states
-    exec ros2 launch rebel_demo teleop.launch.py target:=isaac rig:=both rviz:=false scale:=1.0 cutoff_hz:=6.0 \
+    exec ros2 launch rebel_demo teleop.launch.py target:=isaac rig:=both rviz:=false scale_trans:=1.0 cutoff_hz:=6.0 \
       left_hand_frame:=2 left_gripper_frame:=4 \
       right_hand_frame:=1 right_gripper_frame:=3 gripper_mode:=orientation \
       orientation:=semi max_joint_speed_deg:=45 workspace_max:="0.7 0.7 1.4" \
