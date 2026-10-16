@@ -99,22 +99,23 @@ Other IDs: pass them, e.g. `hand_frame:=rigid_body_5 gripper_frame:=rigid_body_6
 `new rigid body: map -> rigid_body_<ID>` for every rigid body it receives.
 
 ## 3. Build this package
-Get the code into the workspace `src` folder (clone it as `rebel_demo`):
+Get the code into the workspace `src` folder (the clone creates `src/rebel_mocap_teleop/`; the ROS package inside it is
+called `rebel_demo`):
 ```bash
-mkdir -p ~/rebel_ws/src
-cd ~/rebel_ws/src
-git clone https://github.com/duckQuu/rebel_mocap_teleop.git rebel_demo
+mkdir -p ~/dual_arm_control/src
+cd ~/dual_arm_control/src
+git clone git@github.com:KarelGans/rebel_mocap_teleop.git
 ```
 The robot model needs the `igus_rebel_description` package (rebel2 arm + XEG-32 macros, `meshes/` and
 `meshes_low/`). It is **not in this repository** (vendor CAD). Put the igus mesh LOD bundle folder in your home
-directory as `~/igus_mesh_lod_bundle`, then copy the package next to `rebel_demo` (colcon does not find packages
+directory as `~/igus_mesh_lod_bundle`, then copy the package next to `rebel_mocap_teleop` (colcon does not find packages
 nested inside another package, so it must sit directly in `src/`):
 ```bash
-cp -r ~/igus_mesh_lod_bundle/src/igus_rebel_description ~/rebel_ws/src/
+cp -r ~/igus_mesh_lod_bundle/src/igus_rebel_description ~/dual_arm_control/src/
 ```
-Build **from the workspace root** `~/rebel_ws` — never from `src/` or `src/rebel_demo/`:
+Build **from the workspace root** `~/dual_arm_control` — never from `src/` or `src/rebel_mocap_teleop/`:
 ```bash
-cd ~/rebel_ws
+cd ~/dual_arm_control
 source /opt/ros/$(ls /opt/ros)/setup.bash
 rosdep install --from-paths src --ignore-src -r -y \
   --skip-keys "topic_based_ros2_control gz_ros2_control ros_gz_bridge"   # igus_rebel_description extras, not needed here
@@ -133,18 +134,18 @@ environment is first on `PATH`. Run `conda deactivate` and build again (or add
 
 Check the layout. `build`, `install`, `log` must sit next to `src`, not inside it:
 ```
-~/rebel_ws/
-  build/  install/  log/          <- created by colcon build (run in ~/rebel_ws)
+~/dual_arm_control/
+  build/  install/  log/          <- created by colcon build (run in ~/dual_arm_control)
   src/
     igus_rebel_description/       <- from the igus mesh LOD bundle (not in this repo)
-    rebel_demo/
+    rebel_mocap_teleop/           <- this repo (ROS package name: rebel_demo)
       launch/  rebel_demo/  resource/  rviz/  test/  tools/
       package.xml  README.md  setup.cfg  setup.py
 ```
 Built in the wrong folder by mistake? Delete the stray output and rebuild from the root:
 ```bash
-rm -rf ~/rebel_ws/src/build ~/rebel_ws/src/install ~/rebel_ws/src/log
-cd ~/rebel_ws && rm -rf build install log && colcon build --symlink-install
+rm -rf ~/dual_arm_control/src/build ~/dual_arm_control/src/install ~/dual_arm_control/src/log
+cd ~/dual_arm_control && rm -rf build install log && colcon build --symlink-install
 ```
 When to rebuild: with `--symlink-install`, edits to existing `.py` files apply on the next launch. Rebuild after
 adding or renaming files, or changing `setup.py`, `package.xml`, the URDF, meshes or launch files.
@@ -157,7 +158,7 @@ Without `--symlink-install`, rebuild after every edit.
 - After a failed symlink build, a plain build fails with `option --uninstall not recognized`.
   Delete the leftovers and rebuild: `rm -rf build/rebel_demo install/rebel_demo && colcon build`
 - Install into the env: `conda install -c robostack-jazzy -c conda-forge ros-jazzy-xacro ros-jazzy-joint-state-publisher-gui ffmpeg pyarrow`
-- Workspace on this Mac: `~/Downloads/rebel_teleop_ws` (use it instead of `~/rebel_ws`).
+- Workspace on this Mac: `~/Downloads/rebel_teleop_ws` (use it instead of `~/dual_arm_control`).
 
 Add the environment to `~/.bashrc` once (every terminal must have the **same** values — and the terminal that
 starts Isaac Sim too). `ROS_DOMAIN_ID=42`: pick a number nobody else on your network uses.
@@ -166,7 +167,7 @@ sudo apt install -y ros-$(ls /opt/ros)-rmw-cyclonedds-cpp
 cat >> ~/.bashrc <<'BASHRC'
 source /opt/ros/$(ls /opt/ros)/setup.bash
 source ~/mocap_ws/install/setup.bash
-source ~/rebel_ws/install/setup.bash
+source ~/dual_arm_control/install/setup.bash
 export ROS_DOMAIN_ID=42
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 BASHRC
@@ -181,7 +182,7 @@ mocap first. Without the `~/.bashrc` lines from section 3, run in each new termi
 ```bash
 source /opt/ros/$(ls /opt/ros)/setup.bash
 source ~/mocap_ws/install/setup.bash     # mocap4r2_msgs: needed by mocap_tf even with target:=isaac
-source ~/rebel_ws/install/setup.bash     # rebel_demo + igus_rebel_description
+source ~/dual_arm_control/install/setup.bash     # rebel_demo + igus_rebel_description
 ```
 Skipping the mocap line makes the `mocap_tf` node die with `No module named 'mocap4r2_msgs'` (the rest of the launch
 keeps running, but no hand TF is published). Only `mocap_bridge:=false` (section 6) runs without it.
@@ -457,25 +458,25 @@ One command per terminal (no mocap driver needed: `mocap_bridge:=false`):
 ```bash
 # a) RViz only, one arm
 ros2 launch rebel_demo teleop.launch.py target:=rviz mocap_bridge:=false
-python3 ~/rebel_ws/src/rebel_demo/tools/fake_hand.py
+python3 ~/dual_arm_control/src/rebel_mocap_teleop/tools/fake_hand.py
 
 # b) RViz only, both arms (right hand half a cycle behind), repeating
 ros2 launch rebel_demo teleop.launch.py target:=rviz rig:=both mocap_bridge:=false
-python3 ~/rebel_ws/src/rebel_demo/tools/fake_hand.py --arm both --loop
+python3 ~/dual_arm_control/src/rebel_mocap_teleop/tools/fake_hand.py --arm both --loop
 
 # c) the full Isaac interface with the fake Isaac (topics, sim clock, joint names exactly as with Isaac)
-python3 ~/rebel_ws/src/rebel_demo/tools/fake_isaac.py
+python3 ~/dual_arm_control/src/rebel_mocap_teleop/tools/fake_isaac.py
 ros2 launch rebel_demo teleop.launch.py target:=isaac rig:=both mocap_bridge:=false
-python3 ~/rebel_ws/src/rebel_demo/tools/fake_hand.py --arm both --sim-time --loop
+python3 ~/dual_arm_control/src/rebel_mocap_teleop/tools/fake_hand.py --arm both --sim-time --loop
 
 # d) real Isaac, fake hands: as c) without fake_isaac.py (Isaac playing, bridge scripts run)
 
 # e) up / down / left / right instead of down / forward (both arms, 10 cm each way; --amp for more)
-python3 ~/rebel_ws/src/rebel_demo/tools/fake_hand.py --arm both --pattern cross --loop     # add --sim-time with target:=isaac
+python3 ~/dual_arm_control/src/rebel_mocap_teleop/tools/fake_hand.py --arm both --pattern cross --loop     # add --sim-time with target:=isaac
 
 # f) through the mocap converter too: publish /rigid_bodies like the OptiTrack driver (Linux, mocap4r2_msgs sourced)
 ros2 launch rebel_demo teleop.launch.py target:=rviz rig:=both                       # mocap_bridge on (default)
-python3 ~/rebel_ws/src/rebel_demo/tools/fake_hand.py --arm both --pattern cross --output rigid_bodies --loop
+python3 ~/dual_arm_control/src/rebel_mocap_teleop/tools/fake_hand.py --arm both --pattern cross --output rigid_bodies --loop
 ```
 `--pattern cross`: hold, up, back, down, back, left, back, right, back, each `--amp` (0.10 m) in the arm's own axes
 (left = the arm base's +y), gripper open. Measured on both arms (RViz and fake Isaac): +-10.0 cm and +-20.0 cm exactly
@@ -486,7 +487,7 @@ on the commanded axis, under 0.5 cm on the others, back at HOME within 1 mm, no 
 `--descend-forward 0` for straight down.
 ```bash
 ros2 launch rebel_demo teleop.launch.py target:=rviz mocap_bridge:=false
-python3 ~/rebel_ws/src/rebel_demo/tools/fake_hand.py --descend 0.05
+python3 ~/dual_arm_control/src/rebel_mocap_teleop/tools/fake_hand.py --descend 0.05
 ```
 Reach of the arm (elbow-up bound on, tool relative to HOME, which is 35 cm in front of the base and 30 cm up): straight
 down it follows exactly to 60 cm below HOME (joint2 140 deg and joint3 15 deg are reached together); the further forward
@@ -510,7 +511,7 @@ Options of `fake_hand.py`: `--arm left|right|both`, `--pattern reach|cross` (+ `
 `--descend STEP` / `--descend-forward RATIO` / `--max-down` [m],
 `--sim-time` (required with `target:=isaac`: teleop runs on Isaac's clock there), `--unstable` (2 mm jitter,
 drop-outs, frozen frames, marker glitches; or `--jitter`, `--dropouts`, `--freezes`, `--outliers`), `--rotate-finger`
-(with `gripper_mode:=orientation`). On this Mac the workspace is `~/Downloads/rebel_teleop_ws` instead of `~/rebel_ws`.
+(with `gripper_mode:=orientation`). On this Mac the workspace is `~/Downloads/rebel_teleop_ws` instead of `~/dual_arm_control`.
 
 ## 7. Real robot (publish the commands for another node to consume)
 Teleop does not talk to hardware itself. It publishes **absolute joint positions** (radians, not deltas) as one
@@ -534,6 +535,24 @@ ros2 launch rebel_demo teleop.launch.py target:=isaac rig:=both rviz:=false scal
   use_sim_time:=false fake_state:=true home_deg:="0 0 100 0 50 0"
 # robot already AT the pose you want (no start move): drop home_deg and add skip_home:=true instead
 ```
+**Best known command so far (real robot, both arms)** - tuned on the real setup; start from this one:
+```bash
+export ROS_DOMAIN_ID=11
+source ~/mocap_ws/install/setup.bash
+source ~/dual_arm_control/install/setup.bash
+ros2 launch rebel_demo teleop.launch.py target:=isaac rig:=both rviz:=false scale:=1.0 cutoff_hz:=6.0 \
+  left_hand_frame:=rigid_body_2 left_gripper_frame:=rigid_body_4 \
+  right_hand_frame:=rigid_body_1 right_gripper_frame:=rigid_body_3 gripper_mode:=orientation \
+  orientation:=semi max_joint_speed_deg:=45 workspace_max:="0.7 0.7 1.4" \
+  robot_ypr:="1.5708 0 0" home_deg:="0 0 60 0 50 0" \
+  use_sim_time:=false fake_state:=true
+```
+Same line without the backslashes: `ros2 launch rebel_demo teleop.launch.py target:=isaac rig:=both rviz:=false scale:=1.0 cutoff_hz:=6.0 left_hand_frame:=rigid_body_2 left_gripper_frame:=rigid_body_4 right_hand_frame:=rigid_body_1 right_gripper_frame:=rigid_body_3 gripper_mode:=orientation orientation:=semi max_joint_speed_deg:=45 workspace_max:="0.7 0.7 1.4" robot_ypr:="1.5708 0 0" home_deg:="0 0 60 0 50 0" use_sim_time:=false fake_state:=true`
+- `robot_ypr:="1.5708 0 0"` turns the robot frame 90 deg about the vertical axis so "forward" matches how you stand
+  (flip the sign if it goes the wrong way); `home_deg` is the start pose of both arms (joints 1-6, degrees).
+- Always put the quotes around values with spaces, and keep the whole command on one logical line (`\` at the line ends).
+- First run on a new robot or setup: lower `scale:=0.5` and `max_joint_speed_deg:=15`, keep the e-stop in reach.
+
 Check what is published (the merged topic must show **one** publisher, `joint_merger`):
 ```bash
 ros2 topic hz   /dual_arm/isaac_joint_commands
@@ -560,7 +579,7 @@ joint5 +-95 deg, others +-179 deg; teleop also keeps joint3 >= 15 deg).
 | driver log `... not connected :(` | Motive streaming off or wrong Local Interface; firewall; IPs in the YAML. Relaunch the driver after fixing (it connects only at launch) |
 | `ping` to the Motive PC says Destination Host Unreachable | the two PCs are not on the same router/network |
 | `message type 'mocap4r2_msgs/msg/RigidBodies' is invalid` | `source ~/mocap_ws/install/setup.bash` |
-| `mocap_tf` dies: `No module named 'mocap4r2_msgs'` / `mocap4r2_msgs not found` | same: `source ~/mocap_ws/install/setup.bash` before `source ~/rebel_ws/install/setup.bash`, then relaunch (needed also for `target:=isaac`) |
+| `mocap_tf` dies: `No module named 'mocap4r2_msgs'` / `mocap4r2_msgs not found` | same: `source ~/mocap_ws/install/setup.bash` before `source ~/dual_arm_control/install/setup.bash`, then relaunch (needed also for `target:=isaac`) |
 | `colcon build` fails: `No module named 'catkin_pkg'`, log shows `miniconda3/bin/python3` | `conda deactivate`, then rebuild (or `--cmake-args -DPython3_EXECUTABLE=/usr/bin/python3`) |
 | RViz `could not connect to display` | started over SSH: use `rviz:=false`, run RViz on a machine with a screen |
 | RViz loads someone else's robot | another project uses the same `ROS_DOMAIN_ID`: pick another number everywhere |
@@ -568,7 +587,7 @@ joint5 +-95 deg, others +-179 deg; teleop also keeps joint3 >= 15 deg).
 | teleop log `holding: no TF arm_left_base_link <- rigid_body_N`, commands stay 0 although engaged | nobody publishes `/dual_arm/isaac_joint_states` (no Isaac in this `ROS_DOMAIN_ID`, or a real robot without a state publisher), so the rig's TF is split. Add `fake_state:=true` (states = commanded joints, others 0), or publish the real joint states there |
 | `TF_OLD_DATA ignoring data from the past ... at time 4.4` (all frames, all nodes) | two clocks or two publishers: Isaac's sim time mixed with PC time. With Isaac do not pass `use_sim_time:=false` / `fake_state:=true`; restart the launch after stopping or resetting Isaac; `ros2 topic info /dual_arm/isaac_joint_states -v` must show one publisher |
 | teleop and Isaac do not see each other | different `ROS_DOMAIN_ID` (Isaac with none = 0): export the same number in every terminal and in the shell that starts Isaac Sim |
-| `colcon build` makes `build/ install/ log/` inside `src/` | you ran it in the wrong folder: delete them, `cd ~/rebel_ws`, build again |
+| `colcon build` makes `build/ install/ log/` inside `src/` | you ran it in the wrong folder: delete them, `cd ~/dual_arm_control`, build again |
 | `No module named 'xacro'` at launch | `sudo apt install ros-$(ls /opt/ros)-xacro` |
 | `package 'igus_rebel_description' not found` | copy it into `src/` if missing, then build it (`colcon build --packages-select igus_rebel_description`) and re-source `install/setup.bash` (section 3) |
 | RViz: `No transform from ... to world` for the arm links | nobody publishes the rig's joint states: Isaac not playing / bridge scripts not run (`ros2 topic hz /dual_arm/isaac_joint_states`), or in `target:=rviz` the `joint_merger` node died (see its traceback) |
