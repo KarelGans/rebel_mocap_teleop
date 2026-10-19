@@ -17,6 +17,18 @@ def test_home_pose():
     assert READY[2] > 0                             # elbow bent the normal way
 
 
+def test_uniform_joint_scaling_keeps_direction():
+    max_step = math.radians(45) / 60
+    want = np.radians([0.0, 3.0, 1.0, 0.0, 0.5, 0.0])           # IK step, ratio 6 : 2 : 1
+    m = float(np.max(np.abs(want)))
+    dq = want * (max_step / m) if m > max_step else want
+    assert math.isclose(float(np.max(np.abs(dq))), max_step)    # largest joint exactly at the limit
+    assert np.allclose(dq / np.linalg.norm(dq), want / np.linalg.norm(want))   # same direction
+    small = np.radians([0.0, 0.1, 0.05, 0.0, 0.0, 0.0])        # below the limit: unchanged
+    m = float(np.max(np.abs(small)))
+    assert np.allclose(small * (max_step / m) if m > max_step else small, small)
+
+
 def test_analytic_jacobian():
     from src.rebel_demo.kinematics import fk_jac
     q = np.radians([10, 30, 60, -20, 40, 15])

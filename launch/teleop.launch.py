@@ -171,7 +171,7 @@ def generate_launch_description():
         D("max_joint_speed_deg", default_value="45.0"),
         D("fake_state", default_value="false",
           description="target:=isaac only: publish the rig joint states from the commands (when no Isaac / robot does)"),
-        D("home_deg", default_value="0 0 0 0 0 0",
+        D("home_deg", default_value="0 0 60 0 50 0",
           description="start pose of every arm, 6 joint angles [deg] (e.g. \"0 0 100 0 50 0\"); the arm moves there at start"),
         D("skip_home", default_value="false",
           description="true = do not move to HOME at start (robot already there); engage right away"),

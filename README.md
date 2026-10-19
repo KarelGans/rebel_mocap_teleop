@@ -236,7 +236,7 @@ to move it ([section 12](#12-testing-without-hardware)). Over SSH add `rviz:=fal
 | max_joint_speed_deg | 45 | per-joint speed limit (the real ReBeL maximum) |
 | workspace_min, workspace_max | `-0.7 -0.7 -0.45`, `0.7 0.7 0.95` | clamp of the tool target in the arm base frame (m), widened to include the pose at engage |
 | limit_warn_mm | 5 | warn `joint limit reached` when the IK is this far (mm) off the target with a joint at a limit |
-| home_deg | `0 0 0 0 0 0` | start pose of every arm, 6 angles in degrees (e.g. `"0 0 60 0 50 0"`); checked against the joint limits at start |
+| home_deg | `0 0 60 0 50 0` | start pose of every arm, 6 angles in degrees (e.g. `"0 0 60 0 50 0"`); checked against the joint limits at start |
 | skip_home | false | no start-up move; start from the measured joints (zeros if none arrive); `engage` works at once |
 | **gripper** | | |
 | gripper | true | start the gripper nodes (`false` if Isaac reports errors for the mimic joint `..._right_carriage_joint`) |

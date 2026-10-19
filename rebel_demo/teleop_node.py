@@ -6,7 +6,7 @@ Pipeline, every cycle (default 60 Hz):
   3. LOW-PASS filter on the hand pose            (position: 1st-order; orientation: slerp)
   4. clutch + mapping: relative (the hand moves the tool by the same amount x scale), workspace clamp
   5. real-time IK  target flange pose -> 6 joint angles, seeded with the last command
-  6. joint speed limit                            (max_joint_speed_deg per joint)
+  6. joint speed limit                            (max_joint_speed_deg; all joints scaled together, keeps the path)
   7. publish sensor_msgs/JointState on command_topic (/dual_arm/isaac_joint_commands for the Isaac rig)
 
 Clutch : call the service  ~/engage  (std_srvs/SetBool)
@@ -42,7 +42,7 @@ Parameters (defaults in brackets)
   max_hand_speed [2.0]    m/s; a sample jumping further than this (+1 cm) is a marker glitch and ignored for up to 0.1 s
   max_tool_speed [0.5]    m/s; the IK target never moves faster (smooth catch-up after a tracking gap)
   home_wait [1.0]         s to wait for joint states at start; the robot then moves from there to HOME
-  home_deg ["0 0 0 0 0 0"]  HOME pose, 6 joint angles in degrees (launch: home_deg:="0 0 100 0 50 0"); the start move
+  home_deg ["0 0 60 0 50 0"]  HOME pose, 6 joint angles in degrees (launch: home_deg:="0 0 100 0 50 0"); the start move
                           goes there and the IK's posture preference pulls towards it
   skip_home [false]       true = do not move to HOME at start: take the measured joints (all zeros if none arrive within
                           home_wait) as the start pose and allow ~/engage at once. For a robot that already is at HOME.
@@ -149,7 +149,7 @@ class Teleop(Node):
         self.target = None                                                # last IK target position (rate limit)
         self.home_wait = float(d("home_wait", 1.0).value)
         self.skip_home = bool(d("skip_home", False).value)
-        self.home = parse_pose_deg(d("home_deg", "0 0 0 0 0 0").value)    # HOME [rad]; raises on bad input
+        self.home = parse_pose_deg(d("home_deg", "0 0 60 0 50 0").value)    # HOME [rad]; raises on bad input
         self.engaged = bool(d("start_engaged", False).value)
         topic = d("command_topic", "/dual_arm/isaac_joint_commands").value
         self.pub_js = bool(d("publish_joint_states", False).value)
@@ -385,8 +385,13 @@ class Teleop(Node):
             if pe > 0.02:
                 self.get_logger().warn(f"target not reachable ({pe * 1000:.0f} mm off) - moving as close as possible",
                                        throttle_duration_sec=1.0)
-        # 6. joint speed limit
-        dq = np.clip(q_ik - self.q_cmd, -self.vmax * self.dt, self.vmax * self.dt)
+        # 6. joint speed limit: scale ALL joints by the same factor so the step keeps the IK's direction and the tool
+        # stays on its path (clipping each joint on its own bends the motion when one joint saturates)
+        dq = q_ik - self.q_cmd
+        m = float(np.max(np.abs(dq)))                     # largest joint step this cycle [rad]
+        max_step = self.vmax * self.dt
+        if m > max_step:
+            dq *= max_step / m
         self.q_cmd = np.clip(self.q_cmd + dq, LOWER, UPPER)
         self.publish(self.q_cmd)                           # 7.
 
