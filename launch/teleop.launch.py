@@ -116,6 +116,7 @@ def setup(context):
                               "roll_sign": float(a("roll_sign")),
                               "cutoff_hz": float(a("cutoff_hz")),
                               "max_joint_speed_deg": float(a("max_joint_speed_deg")),
+                              "stale_timeout": float(a("stale_timeout")),
                               "skip_home": a("skip_home").lower() == "true",
                               "limit_margin_deg": float(a("limit_margin_deg")),
                               "limit_follow": a("limit_follow").lower() == "true",
@@ -137,6 +138,7 @@ def setup(context):
                                   "close_angle_deg": float(a("gripper_close_angle")),
                                   "threshold": float(a("gripper_threshold")),
                                   "hysteresis": float(a("gripper_hysteresis")),
+                                  "stale_timeout": float(a("stale_timeout")),
                                   "invert": a("gripper_invert").lower() == "true",
                                   "joint_prefix": arm["grip_prefix"],
                                   "command_topic": grip_out,
@@ -183,6 +185,9 @@ def generate_launch_description():
         D("roll_sign", default_value="1.0", description="orientation:=semi: -1 flips the joint 6 direction"),
         D("cutoff_hz", default_value="4.0", description="low-pass cutoff on the hand pose"),
         D("max_joint_speed_deg", default_value="45.0"),
+        D("stale_timeout", default_value="0.2",
+          description="s without a new hand pose before teleop / gripper hold; raise it (e.g. 0.5) when the mocap network "
+                      "delivers frames late or in bursts (driver log: 'Optitrack system latency >100 ms')"),
         D("robot_tf", default_value="own",
           description="own = start our robot_state_publisher (rig model) | external = the robot PC publishes the arm TF "
                       "(world -> arm_*_base_link) on this ROS domain: do not start a second model"),

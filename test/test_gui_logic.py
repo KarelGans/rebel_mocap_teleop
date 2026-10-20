@@ -30,11 +30,11 @@ def same_values(a, b):
 # the "best known" real-robot command of the README / scripts/run.sh real
 RUN_SH_REAL = {"target": "isaac", "rig": "both", "rviz": "false", "scale_trans": "1.0", "cutoff_hz": "6.0",
                "left_hand_frame": "2", "left_gripper_frame": "4", "right_hand_frame": "1", "right_gripper_frame": "3",
-               "gripper_mode": "orientation", "orientation": "semi", "max_joint_speed_deg": "17",
+               "gripper_mode": "orientation", "orientation": "semi", "max_joint_speed_deg": "45",
                "workspace_max": "0.7 0.7 1.4", "robot_ypr": "1.5708 0 0", "home_deg": "0 0 60 0 50 0",
                "use_sim_time": "false", "fake_state": "true",
-               "robot_joint_states_topic": "/joint_states", "require_joint_states": "true"}
-REAL_ONLY = ("use_sim_time", "fake_state", "robot_joint_states_topic", "require_joint_states")
+               "robot_joint_states_topic": "/joint_states", "require_joint_states": "true", "stale_timeout": "0.5"}
+REAL_ONLY = ("use_sim_time", "fake_state", "robot_joint_states_topic", "require_joint_states", "stale_timeout")
 
 
 def test_real_profile_is_the_run_sh_real_command():
@@ -54,9 +54,7 @@ def test_robot_pc_profile_is_run_sh_real_ext():
 def test_isaac_profile_has_no_real_robot_flags():
     d = as_dict(build_teleop_cmd(BUILTIN_PROFILES["Isaac Sim"]))
     assert not set(REAL_ONLY) & d.keys()
-    expected = {k: v for k, v in RUN_SH_REAL.items() if k not in REAL_ONLY}
-    expected["max_joint_speed_deg"] = "45"                                   # Isaac: no 0.3 rad/s follower in between
-    assert same_values(expected, d)
+    assert same_values({k: v for k, v in RUN_SH_REAL.items() if k not in REAL_ONLY}, d)
 
 
 def test_optional_arguments_only_when_changed():

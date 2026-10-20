@@ -30,10 +30,9 @@ _BASE = {
     "robot_tf": "own", "joint_states_topic": "",
 }
 BUILTIN_PROFILES = {
-    # real robot: the robot PC's mocap follower moves at 0.3 rad/s (17.2 deg/s), so we never command faster
-    "Real robot": dict(_BASE, mode="real", max_joint_speed_deg=17.0),
+    "Real robot": dict(_BASE, mode="real"),
     "Isaac Sim": dict(_BASE, mode="isaac"),
-    "Real robot (robot PC TF)": dict(_BASE, mode="real", robot_tf="external", max_joint_speed_deg=17.0),  # = run.sh real-ext
+    "Real robot (robot PC TF)": dict(_BASE, mode="real", robot_tf="external"),     # = scripts/run.sh real-ext
 }
 DEFAULT_PROFILE = "Real robot"
 
@@ -83,7 +82,8 @@ def build_teleop_cmd(profile):
         cmd.append("robot_tf:=external" if p["robot_tf"] == "external" else "fake_state:=true")
         # start from the robot's measured joints (never assume zeros); never our rig topic, never published by us
         cmd += [f"robot_joint_states_topic:={p['joint_states_topic'].strip() or '/joint_states'}",
-                "require_joint_states:=true"]
+                "require_joint_states:=true",
+                "stale_timeout:=0.5"]   # the mocap network delivers frames late / in bursts: do not hold on short gaps
     elif p["joint_states_topic"].strip():
         cmd.append(f"joint_states_topic:={p['joint_states_topic'].strip()}")
     if not p["mocap_bridge"]:
