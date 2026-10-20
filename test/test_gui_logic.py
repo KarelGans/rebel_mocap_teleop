@@ -45,6 +45,7 @@ def test_robot_pc_profile_is_run_sh_real_ext():
     d = as_dict(build_teleop_cmd(BUILTIN_PROFILES["Real robot (robot PC TF)"]))
     expected = {k: v for k, v in RUN_SH_REAL.items() if k != "fake_state"}
     expected["robot_tf"] = "external"
+    expected["robot_ypr"] = "0 0 0"                                          # the robot PC's world = left arm base
     assert same_values(d, expected)
     assert validate(dict(BUILTIN_PROFILES["Isaac Sim"], robot_tf="external"))              # not with Isaac
     d = as_dict(build_teleop_cmd(dict(BUILTIN_PROFILES["Real robot (robot PC TF)"], joint_states_topic="/robot/js")))

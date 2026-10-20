@@ -168,7 +168,9 @@ ros2 launch rebel_demo teleop.launch.py target:=isaac rig:=both rviz:=false scal
 - **The robot PC publishes the arm TF on the same ROS domain** (its own `robot_state_publisher`, MoveIt, RViz): then replace
   `fake_state:=true` by `robot_tf:=external` (this is `run.sh real-ext`). Teleop then does not start a second robot model, which
   would fight the robot's frames (same frame names, other timestamps: `TF_OLD_DATA` flood, lag, stale holds). It reads the
-  start pose from `/joint_states` as well.
+  start pose from `/joint_states` as well. The robot PC's `world` **is** the left arm base (our model turns both bases by
+  -90 deg), so use `robot_ypr:="0 0 0"` there (what `run.sh real-ext` does) for the same directions as `1.5708` with `real`.
+  Check whether the robot PC publishes the arms: `ros2 run tf2_ros tf2_echo world arm_left_base_link` prints a pose.
 
 ### 2.3 Isaac Sim
 In Isaac's Script Editor (stage loaded, timeline **stopped**) run the rig's three scripts, then press **Play**. Isaac must be

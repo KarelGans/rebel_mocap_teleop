@@ -32,7 +32,8 @@ _BASE = {
 BUILTIN_PROFILES = {
     "Real robot": dict(_BASE, mode="real"),
     "Isaac Sim": dict(_BASE, mode="isaac"),
-    "Real robot (robot PC TF)": dict(_BASE, mode="real", robot_tf="external"),     # = scripts/run.sh real-ext
+    # robot PC TF: its world IS the left arm base (our model turns the bases -90 deg), so no extra yaw
+    "Real robot (robot PC TF)": dict(_BASE, mode="real", robot_tf="external", robot_ypr="0 0 0"),  # = run.sh real-ext
 }
 DEFAULT_PROFILE = "Real robot"
 
