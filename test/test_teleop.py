@@ -286,3 +286,94 @@ def test_keep_following_after_a_limit():
     """The 'same data although I moved my hand' case: with limit_follow the arm comes back as soon as the hand does."""
     assert _replay(follow=False) > 1.0                 # old: more than a second of no response after the hand turned
     assert _replay(follow=True) < 0.25                 # new: comes back at once (the rest is the joint speed limit)
+
+
+# ---------------------------------------------------------------- orientation:=true: robot_remote's method
+from rebel_demo.kinematics import (drop_unreachable_rot, ik_priority, step_toward, toward_point,  # noqa: E402
+                                   toward_rot)
+
+
+def test_ik_priority_reaches_reachable_poses():
+    lo, hi, _, _ = soft_limits(5.0)
+    rng = np.random.default_rng(1)
+    for _ in range(30):
+        q_goal = rng.uniform(lo + 0.2, hi - 0.2)
+        q_goal[4] = rng.uniform(0.3, 1.4)                    # wrist bent the home way (no singularity at joint 5 = 0)
+        seed = np.clip(q_goal + rng.normal(0, 0.05, 6), lo, hi)
+        _, pe, re = ik_priority(fk(q_goal), seed, lo, hi)
+        assert pe < 1e-4 and re < 0.05
+
+
+def test_ik_priority_keeps_the_position_at_a_wrist_limit():
+    """Twist 30 deg past joint 6's limit: joint 6 stops there, the tool stays put and no other joint takes the twist over
+    (re-solving with the other joints, as robot_remote does, turned joint 4 by 24 deg here)."""
+    lo, hi, _, _ = soft_limits(5.0)
+    q0 = np.radians([0, 0, 60, 0, 50, 170])
+    T = fk(q0)
+    T[:3, :3] = rot(T[:3, 2], math.radians(30)) @ T[:3, :3]
+    q, pe, re = ik_priority(T, q0, lo, hi)
+    assert q[5] == pytest.approx(hi[5]) and pe < 1e-4 and re == pytest.approx(26.0, abs=0.5)
+    assert np.degrees(np.abs(q - q0)[:5]).max() < 0.5
+
+
+def test_step_toward_keeps_the_direction():
+    q = step_toward(np.zeros(3), np.array([1.0, 0.1, -0.5]), 0.1)
+    assert np.allclose(q, [0.1, 0.01, -0.05])                # all joints scaled by the same factor
+    assert np.allclose(step_toward(np.zeros(2), np.array([0.05, 0.0]), 0.1), [0.05, 0.0])
+    assert np.allclose(toward_point(np.zeros(3), np.array([1.0, 0, 0]), 0.05), [0.05, 0, 0])
+    R = toward_rot(np.eye(3), rot(np.array([0, 0, 1.0]), 1.0), 0.2)
+    assert np.allclose(R, rot(np.array([0, 0, 1.0]), 0.2))
+
+
+def test_drop_unreachable_rot_maps_onto_the_reached_rotation():
+    R_ref = fk(np.radians([0, 0, 60, 0, 50, 0]))[:3, :3]
+    R_hand = rot(np.array([0.3, 0.5, 0.8]) / np.linalg.norm([0.3, 0.5, 0.8]), 0.7)
+    R_reached = rot(np.array([1.0, 0, 0]), 0.4) @ R_ref
+    for s in (1.0, 0.5, 2.0):
+        anchor = drop_unreachable_rot(R_hand, R_reached, R_ref, s)
+        assert np.allclose(scale_rotation(R_hand @ anchor.T, s) @ R_ref, R_reached, atol=1e-9)
+
+
+def _replay_full_pose(axis, amp_deg, rate_deg=30.0):
+    """teleop's orientation:=true cycle (rate limit, lead clamp, ik_priority, keep following, step_toward), defaults of the
+    node: hand position fixed, hand turns amp_deg about `axis` (base frame) and back.
+    Returns (s until the arm reacts after the hand turned back, max tool offset from where the hand puts it [m], q min, q max)."""
+    dt, vmax = 1 / 60, math.radians(45)
+    lo, hi, out_lo, out_hi = soft_limits(5.0)
+    q_cmd = np.radians([0, 0, 60, 0, 50, 0])
+    ref = fk(q_cmd)
+    href_R, target, cmd_R = np.eye(3), ref[:3, 3].copy(), ref[:3, :3].copy()
+    half = amp_deg / rate_deg
+    qs, off = [], 0.0
+    for k in range(int((2 * half + 1.0) / dt)):
+        t = k * dt
+        R_h = rot(axis, math.radians(rate_deg) * (min(t, half) - min(max(0.0, t - half), half)))
+        target = toward_point(target, ref[:3, 3], 0.5 * dt)
+        cmd_R = toward_rot(cmd_R, R_h @ href_R.T @ ref[:3, :3], math.radians(90) * dt)
+        ach = fk(q_cmd)
+        target = toward_point(ach[:3, 3], target, 0.05)
+        cmd_R = toward_rot(ach[:3, :3], cmd_R, math.radians(15))
+        T = np.eye(4)
+        T[:3, 3], T[:3, :3] = target, cmd_R
+        q_ik, pe, re = ik_priority(T, q_cmd, lo, hi)
+        if limits_hit(q_ik, lo, hi) and re > 1.0:
+            R_reached = fk(q_ik)[:3, :3]
+            href_R, cmd_R = drop_unreachable_rot(R_h, R_reached, ref[:3, :3], 1.0), R_reached.copy()
+        q_cmd = np.clip(step_toward(q_cmd, q_ik, vmax * dt), np.minimum(out_lo, q_cmd), np.maximum(out_hi, q_cmd))
+        qs.append(q_cmd.copy())
+        off = max(off, float(np.linalg.norm(fk(q_cmd)[:3, 3] - ref[:3, 3])))
+    turn = int(half / dt)
+    back = next(i for i in range(turn, len(qs)) if np.degrees(np.max(np.abs(qs[i] - qs[turn]))) > 2.0)
+    qs = np.degrees(np.array(qs))
+    return (back - turn) * dt, off, qs.min(0), qs.max(0)
+
+
+def test_full_pose_hand_turning_past_a_limit():
+    """The case from the real robot (2026-10-21): with orientation:=true the arm moved 0.8 m while the hand only turned
+    past the wrist's limits. Now the tool stays where the hand puts it and the wrist turns back at once."""
+    ref = fk(np.radians([0, 0, 60, 0, 50, 0]))
+    for axis in (ref[:3, 2], ref[:3, 1], ref[:3, 0], np.array([0, 0, 1.0])):    # tool z / y / x, base z
+        back, off, _, _ = _replay_full_pose(axis, 300)
+        assert off < 0.005 and back < 0.25
+    _, _, qmin, qmax = _replay_full_pose(ref[:3, 2], 300)                     # twist past joint 6: only joint 6 moves
+    assert np.all((qmax - qmin)[:5] < 1.0) and qmax[5] == pytest.approx(174.0, abs=0.1)

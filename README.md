@@ -171,6 +171,8 @@ ros2 launch rebel_demo teleop.launch.py target:=isaac rig:=both rviz:=false scal
 - Single arm: add `rig:=left` (uses `left_hand_frame` / `left_gripper_frame`) or `rig:=right` (uses `right_*`), e.g.
   `run.sh real-ext rig:=left`; the other side's arguments are then ignored. `run.sh keyboard` and `run.sh calibrate` find the
   running arm(s) by themselves (start them after the launch).
+- Full hand rotation (the whole wrist follows your hand, not only joint 6): add `orientation:=true`, e.g.
+  `run.sh real-ext rig:=left orientation:=true` ([5](#5-orientation-modes): robot_remote's method).
 - **The robot PC publishes the arm TF on the same ROS domain** (its own `robot_state_publisher`, MoveIt, RViz): then replace
   `fake_state:=true` by `robot_tf:=external` (this is `run.sh real-ext`). Teleop then does not start a second robot model, which
   would fight the robot's frames (same frame names, other timestamps: `TF_OLD_DATA` flood, lag, stale holds). It reads the
@@ -284,6 +286,8 @@ One window instead of the driver, teleop, keyboard and calibrate terminals (need
 | scale_rot | 1.0 | hand-to-robot rotation ratio: wrist turn with `orientation:=true`, joint-6 roll with `semi`; unused with `false` |
 | orientation | false | `false` position only; `true` follow the full hand rotation; `semi` position only plus joint 6 follows your hand's roll ([section 5](#5-orientation-modes)) |
 | roll_sign | 1.0 | `orientation:=semi`: `-1` flips the joint-6 direction |
+| max_tool_rot_speed_deg | 90 | `orientation:=true`: the commanded tool rotation turns at most this fast (deg/s) |
+| max_lead_m, max_lead_deg | 0.05, 15 | `orientation:=true` anti-windup: how far the command may run ahead of the commanded joints' pose ([5](#5-orientation-modes)) |
 | cutoff_hz | 4.0 | low-pass cutoff on the hand pose; lower = smoother but more lag |
 | max_joint_speed_deg | 45 | per-joint speed limit of teleop's command (the ReBeL maximum; the robot PC's follower adds its own 0.3 rad/s) |
 | stale_timeout | 0.2 | s without a new hand pose before teleop and the gripper hold; `run.sh real` uses 0.5 because the mocap network delivers frames late / in bursts |
@@ -318,11 +322,12 @@ Node-only parameters (set with `--ros-args -p`): teleop `rate_hz` 60,
    when the hand moves any other way (instead of publishing the same joints until the hand comes all the way back).
 5. IK: damped least squares with the analytic Jacobian (~3 ms), warm-started from the last command. A joint that would cross
    a limit is pinned at it and the rest re-solved, so an unreachable target gives the closest reachable pose. Position only
-   unless `orientation:=true`; the free wrist is pulled gently towards `home_deg`. **Elbow up:** joint 3 is kept >= +15 deg (a
+   unless `orientation:=true` (then: task-priority IK, position first, [5](#5-orientation-modes)); the free wrist is pulled
+   gently towards `home_deg`. **Elbow up:** joint 3 is kept >= +15 deg (a
    deliberate bound in `kinematics.py`): in front of the arm every elbow-up solution has joint 3 > 0, and the stretched arm
    (joint 3 = 0) would let it flip to elbow-down. A target needing a straighter arm is not reached; the log says
    `joint limit reached: ... elbow-up bound 15 deg` (any joint at a limit is named the same way).
-6. Per-joint speed limit (`max_joint_speed_deg`), and the **soft limits**: the IK and the published command never go closer than
+6. Per-joint speed limit (`max_joint_speed_deg`; `orientation:=true`: all joints scaled together), and the **soft limits**: the IK and the published command never go closer than
    `limit_margin_deg` (5 deg) to a joint limit. A joint that already is beyond that (e.g. the measured start pose) may only move
    back inside, at the speed limit. The stream keeps going at 60 Hz while a joint sits at its soft limit.
 7. Publish `sensor_msgs/JointState` (`arm_<side>_joint1..6`, radians); `joint_merger` merges all arms and grippers into one
@@ -333,10 +338,26 @@ Node-only parameters (set with `--ros-args -p`): teleop `rate_hz` 60,
 |---|---|---|
 | `false` (stable default) | tool **position** only (3 equations, 6 joints); orientation is ignored (not locked: it drifts with joints 1-3) | wrist only pulled gently back to `home_deg`; joint 6 never moves (its axis passes through the tool point, so it cannot change the position) |
 | `semi` | same as `false` for joints 1-5 | joint 6 = its angle at engage + `roll_sign` x `scale_rot` x your hand's twist about the tool axis (measured since engage, continuous past 180 deg, limited to +-179 deg and the speed limit). Tilting the hand adds ~0 |
-| `true` | position **and** rotation (rotation weighted 0.3) | the wrist follows the hand; near the straight-up pose (joint 5 about 0) joints 4 and 6 share an axis and can swing to +-179 deg for a small tilt. Start with a bent wrist (e.g. `home_deg:="0 0 60 0 50 0"`) |
+| `true` | position **and** rotation, with [robot_remote](https://github.com/Patrick-zhuyanxun/robot_remote)'s method (below) | the wrist follows the hand; at a wrist limit the rotation stops there. Near the straight-up pose (joint 5 about 0) joints 4 and 6 share an axis: start with a bent wrist (e.g. `home_deg:="0 0 60 0 50 0"`) |
 
 `semi` measures the twist about the tool axis **at engage**, expressed in the robot base frame; with the tool vertical this
 is a rotation about the vertical axis, so swinging the hand sideways also turns joint 6. Wrong direction: `roll_sign:=-1`.
+
+`true` works like robot_remote's `quest_dual_arm_teleop.py` (the same steps, every cycle):
+1. **Task-priority IK**: the tool position is the first task; the rotation is solved only with the joint motion that does
+   not move the tool. A rotation the arm cannot make never moves the tool.
+2. **Rate limit**: the commanded pose follows the hand at most `max_tool_speed` (0.5 m/s) / `max_tool_rot_speed_deg` (90).
+3. **Anti-windup**: the command may run at most `max_lead_m` (5 cm) / `max_lead_deg` (15 deg) ahead of the pose of the
+   commanded joints, so a hand that asks for more than the arm can do never pulls the IK towards a far-away configuration.
+4. **Joint speed**: all joints are scaled together at `max_joint_speed_deg` (robot_remote's `step_toward`), so a fast
+   wrist turn keeps its direction instead of swinging the tool.
+
+Two differences: at a joint limit the rotation is left short and **not** handed to the other joints (robot_remote
+re-solves it with them, which made joints 4 / 5 travel up to 100 deg and, past a limit, the tool wander 0.7 m in our
+replay); and `limit_follow` (default) forgets the hand rotation past the limit like the position, so the wrist turns back
+as soon as your hand does (robot_remote: re-grip). Before 2026-10-21 `true` used a weighted IK that gave up position for
+rotation at a limit: on the real robot the arm moved 0.8 m while the hand moved 3-25 cm, and the wrist flipped
+(joint 5 through 0, joints 4 / 6 shifted by about 180 deg: ~2 rad sent where ~-1 rad was expected).
 
 ## 6. Start pose and joint feedback
 Teleop needs two things from outside: the arm's start pose and (for the rig TF) a joint-state stream on
@@ -536,10 +557,12 @@ joint, stopped the target.
 | the real arm reacts late although teleop runs fine | `run.sh lag` in its own terminal while you move: `commands 60 Hz` is our side (teleop adds ~35 ms, measured the same before and after the joint-limit changes), `arm N ms behind` is the robot side: about 1/kp of the follower (kp 2.0 = 0.5 s) plus its 0.3 rad/s cap. Raise kp / max_velocity / max_acceleration on the robot PC |
 | follower status `clamped` | teleop's margin is smaller than the follower's 2.9 deg: keep `limit_margin_deg` above 3 (default 5) |
 | teleop log `waiting for the measured joints ... on /joint_states` | the robot's joint states do not arrive (robot PC off, other `ROS_DOMAIN_ID`, other names): `ros2 topic echo /joint_states --once --field name` must list `arm_left_joint1..6` / `arm_right_joint1..6` |
-| constant `joint limit reached` warnings | the IK is pinned at a joint limit. Common: joint 3 at the 15 deg elbow bound when starting from zeros, joints 4 / 6 at +-179 with `orientation:=true` (singularity), the workspace box (`target clamped by ...`). See [5](#5-orientation-modes) and [12](#12-testing-without-hardware) |
+| constant `joint limit reached` warnings | the IK is pinned at a joint limit. Common: joint 3 at the 15 deg elbow bound when starting from zeros, joint 5 / 6 at +-89 / +-174 with `orientation:=true` (the hand turned further than the wrist can; turn back a little), the workspace box (`target clamped by ...`). See [5](#5-orientation-modes) and [12](#12-testing-without-hardware) |
 
 ## Known issues
-- No collision checking. Joints stop `limit_margin_deg` (5 deg) before their limits; with `limit_follow` the arm follows again at once when the hand moves another way, but a hand **rotation** beyond reach with `orientation:=true` is still remembered (joints 4 and 6 can sit at +-174 deg near the straight-wrist singularity).
+- No collision checking. Joints stop `limit_margin_deg` (5 deg) before their limits; with `limit_follow` the arm follows again at once when the hand moves another way (position and, with `orientation:=true`, rotation).
+- `orientation:=true` at a wrist limit: the rotation stops for that cycle as a whole, so a tilt you make while still turning
+  past the limit is not followed; turn back a little and it is.
 - IK targets `tool0`, not the point between the XEG jaws; with `orientation:=true` the fingertips swing.
 - The wrist side (joint 5 sign) is not constrained; only the elbow is (joint 3 >= 15 deg).
 - `fake_state` mirrors the commands, it does not measure the arm. The XEG open / closed carriage values are the model joint limits (16.5 mm travel per jaw): check against the datasheet.
