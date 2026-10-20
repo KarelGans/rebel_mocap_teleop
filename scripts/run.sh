@@ -11,6 +11,8 @@
 #   ui         the GUI: start/stop driver + teleop, status lights, engage/pause buttons, settings profiles (SPACE pauses)
 #   keyboard   SPACE = pause/resume both arms, l / r = left / right arm only, q = quit (own terminal)
 #   calibrate  save the open-hand pose of both grippers (hold both hands open, launch must be running)
+#   lag        how far the real arm lags behind teleop's commands (tools/lag_probe.py: passive, publishes nothing;
+#              run it in its own terminal while you move the hand), e.g. run.sh lag --arm right
 #   driver     start the OptiTrack (mocap4r2) driver
 #   activate   activate the OptiTrack driver (after "Configured!" in the driver terminal)
 #   build      colcon build of rebel_demo from the workspace root
@@ -81,6 +83,9 @@ case "$cmd" in
   calibrate)
     ros2 service call /rebel_gripper_left/calibrate std_srvs/srv/Trigger
     ros2 service call /rebel_gripper_right/calibrate std_srvs/srv/Trigger
+    ;;
+  lag)
+    exec python3 "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../tools/lag_probe.py" "$@"
     ;;
   driver)
     exec ros2 launch mocap4r2_optitrack_driver optitrack2.launch.py "$@"

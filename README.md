@@ -152,6 +152,10 @@ ros2 launch rebel_demo teleop.launch.py target:=isaac rig:=both rviz:=false scal
 - `target:=isaac` only selects the output mode (commands go out on a topic); it does not mean Isaac Sim is running.
 - Speed: the follower itself limits the real arm to 0.3 rad/s. Keep teleop's own limit at 45 deg/s: capping our command at
   the follower's speed only adds the follower's tracking lag on top and makes the arm react late (tried 17: too slow).
+- Delay: teleop publishes about 35 ms after the hand moves (the 6 Hz filter). The real arm trails that by about **1/kp** of
+  the follower: kp 2.0 = 0.5 s, even in slow motion, more when the hand moves faster than 0.3 rad/s per joint. Measure it
+  with `run.sh lag` in its own terminal while you move (`arm 480 ms behind`); faster response = a higher kp (8 = 0.12 s),
+  max_velocity and max_acceleration in the follower's config, on the robot PC.
 - `stale_timeout:=0.5`: teleop holds when no new hand pose arrived for this long. The mocap network here delivers frames
   late and in bursts (driver log: `Optitrack system latency >100 ms`, median 0.2 s, up to 2.3 s), so 0.2 s held the arm
   every second or two. Fix the network if you can (wired Motive PC, unicast), then this can go back down.
@@ -390,6 +394,7 @@ rebel_demo/*_node.py           the nodes above            scripts/run.sh   one-c
 rebel_demo/gui_app.py, gui_logic.py   the GUI (Qt window) and its logic (profiles, commands, hints; unit-tested)
 rviz/                          RViz config                test/test_teleop.py   pure-python tests (python3 -m pytest test/)
 tools/fake_hand.py, fake_isaac.py   fake mocap / fake Isaac (section 12)       tools/make_low_poly_meshes.py   mesh decimation, one-off
+tools/lag_probe.py             real arm vs our commands: lag, tracking error, follower state (`run.sh lag`, publishes nothing)
 ```
 
 ## 9. Robot model and joint limits
@@ -425,7 +430,7 @@ Teleop does not talk to hardware itself. One `sensor_msgs/JointState` at 60 Hz o
 (or a relay node) must split this per arm / gripper, keep the names and zero positions consistent with the rig model, and
 forward it to the controller. For a real XEG driver use the gripper's `~/opening_mm` instead of the carriage joints.
 On the real setup this is the robot PC's **mocap follower** (one node per arm, MoveIt Servo, one deadman `/mocap/enable` for
-both): it follows at 0.3 rad/s, clamps targets 0.05 rad inside its URDF limits, switches to a slow catch-up when the error is
+both): it follows at 0.3 rad/s with kp 2.0 (the arm trails our command by ~1/kp = 0.5 s; `run.sh lag` measures it), clamps targets 0.05 rad inside its URDF limits, switches to a slow catch-up when the error is
 above 0.5 rad (29 deg) or a target jumps more than 0.2 rad between two messages, refuses or latches HOLD above 1.75 rad, and
 holds when our stream is older than 0.2 s. Its `/mocap_follower_left/status` (`--once`) names the limit that stopped it. Teleop is
 set up so none of that triggers in normal use: 5 deg margin, start from `/joint_states`, keep following at a limit.
@@ -526,6 +531,7 @@ joint, stopped the target.
 | `run.sh`: Permission denied | `chmod +x scripts/run.sh` once |
 | **Limits** | |
 | real arm stops at a joint limit and holds although the hand moves (teleop keeps sending the same joints) | `limit_follow` (default) drops the hand motion past the limit: the arm follows again as soon as the hand moves another way. If it still holds, ask the follower why: `ros2 topic echo /mocap_follower_left/status --once` (reason: clamped, catch-up, HOLD, ...) |
+| the real arm reacts late although teleop runs fine | `run.sh lag` in its own terminal while you move: `commands 60 Hz` is our side (teleop adds ~35 ms, measured the same before and after the joint-limit changes), `arm N ms behind` is the robot side: about 1/kp of the follower (kp 2.0 = 0.5 s) plus its 0.3 rad/s cap. Raise kp / max_velocity / max_acceleration on the robot PC |
 | follower status `clamped` | teleop's margin is smaller than the follower's 2.9 deg: keep `limit_margin_deg` above 3 (default 5) |
 | teleop log `waiting for the measured joints ... on /joint_states` | the robot's joint states do not arrive (robot PC off, other `ROS_DOMAIN_ID`, other names): `ros2 topic echo /joint_states --once --field name` must list `arm_left_joint1..6` / `arm_right_joint1..6` |
 | constant `joint limit reached` warnings | the IK is pinned at a joint limit. Common: joint 3 at the 15 deg elbow bound when starting from zeros, joints 4 / 6 at +-179 with `orientation:=true` (singularity), the workspace box (`target clamped by ...`). See [5](#5-orientation-modes) and [12](#12-testing-without-hardware) |
