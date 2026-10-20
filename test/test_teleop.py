@@ -235,3 +235,10 @@ def test_full_pose_teleop_loop_stays_inside_the_margin():
         worst = max(worst, float(np.max(np.abs(np.degrees(q_cmd[[3, 5]])))))
         assert np.all(q_cmd >= out_lo - 1e-9) and np.all(q_cmd <= out_hi + 1e-9)
     assert worst <= math.degrees(out_hi[3]) + 1e-6 < 169.01                # +-169 deg, not the +-179 deg hard limit
+
+
+def test_default_one_degree_margin():
+    ik_lo, ik_hi, out_lo, out_hi = soft_limits(1.0)
+    assert np.allclose(np.degrees(out_hi), [178, 139, 139, 178, 94, 178], atol=0.01)
+    assert np.allclose(np.degrees(out_lo), [-178, -79, -79, -178, -94, -178], atol=0.01)
+    assert np.allclose(np.degrees(ik_lo)[2], 15.0)                                       # elbow-up bound unchanged
