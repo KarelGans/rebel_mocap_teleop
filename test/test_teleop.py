@@ -3,8 +3,8 @@ import math
 
 import numpy as np
 
-from src.rebel_demo.kinematics import (HOME, LOWER, UPPER, fk, ik, parse_pose_deg, quat_to_matrix, rot, scale_rotation,
-                                       twist_about)
+from src.rebel_demo.kinematics import (HOME, LOWER, UPPER, clamp_roll, fk, ik, parse_pose_deg, quat_to_matrix, rot,
+                                       scale_rotation, soft_limits, twist_about)
 
 # the bent-elbow "ready" pose (the former HOME; HOME is now all zeros = arm straight up)
 READY = np.radians([0.0, 13.4, 87.9, 0.0, 78.7, 0.0])
@@ -181,3 +181,57 @@ def test_scale_rotation():
     R = rot(axis, math.radians(40))
     out = scale_rotation(R, 0.25)
     assert math.isclose(twist_about(out, axis), math.radians(10), abs_tol=1e-9)  # same axis, a quarter of the angle
+
+
+def test_soft_limits_values():
+    ik_lo, ik_hi, out_lo, out_hi = soft_limits(10.0)
+    deg = np.degrees
+    assert np.allclose(deg(ik_hi), [169, 130, 130, 169, 85, 169], atol=0.01)
+    assert np.allclose(deg(ik_lo), [-169, -70, 15, -169, -85, -169], atol=0.01)       # joint 3 keeps the elbow-up bound
+    assert np.allclose(deg(out_lo), [-169, -70, -70, -169, -85, -169], atol=0.01)     # outputs: hardware limits - margin
+    lo0, hi0, _, _ = soft_limits(0.0)
+    assert np.allclose(lo0, LOWER) and np.allclose(hi0, UPPER)                          # 0 = the old behaviour
+
+
+def test_ik_never_leaves_the_soft_limits():
+    ik_lo, ik_hi, _, _ = soft_limits(10.0)
+    rng = np.random.default_rng(3)
+    for _ in range(200):
+        q0 = np.clip(rng.uniform(LOWER, UPPER), ik_lo, ik_hi)
+        T = fk(np.clip(q0 + rng.uniform(-2.0, 2.0, 6), LOWER, UPPER))              # far targets, also behind the limits
+        T[:3, 3] += rng.uniform(-0.4, 0.4, 3)
+        for w_rot in (0.0, 0.3):
+            q, _, _ = ik(T, q0, w_rot=w_rot, iters=25, lower=ik_lo, upper=ik_hi)
+            assert np.all(q >= ik_lo - 1e-9) and np.all(q <= ik_hi + 1e-9)
+
+
+def test_clamp_roll_anti_windup():
+    lo, hi = math.radians(-169), math.radians(169)
+    acc = 0.0
+    for _ in range(40):                                     # keep turning the hand far past the limit
+        acc += math.radians(10)
+        q6, acc = clamp_roll(0.0, acc, 1.0, lo, hi)
+    assert math.isclose(q6, hi) and math.isclose(acc, hi)  # held at the limit, accumulator not wound up
+    q6, acc = clamp_roll(0.0, acc - math.radians(10), 1.0, lo, hi)
+    assert math.isclose(math.degrees(q6), 159, abs_tol=1e-6)   # turning back moves it at once
+    q6, _ = clamp_roll(0.0, math.radians(400), -1.0, lo, hi)
+    assert math.isclose(q6, lo)                            # roll_sign -1 clamps at the other side
+
+
+def test_full_pose_teleop_loop_stays_inside_the_margin():
+    """The case from the real robot: orientation:=true, hand rotating far past what joints 4 / 6 allow."""
+    ik_lo, ik_hi, out_lo, out_hi = soft_limits(10.0)
+    vmax, dt = math.radians(45), 1 / 60
+    q_cmd = np.radians([0, 0, 60, 0, 50, 0])
+    ref = fk(q_cmd)
+    axis = np.array([0.3, 0.2, 1.0]) / np.linalg.norm([0.3, 0.2, 1.0])
+    worst = 0.0
+    for k in range(1200):                                   # 20 s, hand turns 2.5 full turns and tilts
+        T = ref.copy()
+        T[:3, :3] = rot(axis, 2.5 * 2 * math.pi * k / 1200) @ rot(np.array([1.0, 0, 0]), 0.4 * math.sin(k / 90)) @ ref[:3, :3]
+        q_ik, _, _ = ik(T, q_cmd, w_rot=0.3, iters=25, q_rest=None, lower=ik_lo, upper=ik_hi)
+        dq = np.clip(q_ik - q_cmd, -vmax * dt, vmax * dt)
+        q_cmd = np.clip(q_cmd + dq, np.minimum(out_lo, q_cmd), np.maximum(out_hi, q_cmd))
+        worst = max(worst, float(np.max(np.abs(np.degrees(q_cmd[[3, 5]])))))
+        assert np.all(q_cmd >= out_lo - 1e-9) and np.all(q_cmd <= out_hi + 1e-9)
+    assert worst <= math.degrees(out_hi[3]) + 1e-6 < 169.01                # +-169 deg, not the +-179 deg hard limit

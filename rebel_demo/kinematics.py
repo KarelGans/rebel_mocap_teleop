@@ -34,6 +34,8 @@ JOINTS = [
 
 LOWER = np.array([j[3] for j in JOINTS])
 UPPER = np.array([j[4] for j in JOINTS])
+HW_LOWER = LOWER.copy()
+HW_LOWER[2] = math.radians(-80.0)                 # the robot's joint-3 limit; LOWER[2] is the IK's 15 deg elbow-up bound
 VMAX = math.radians(45.0)                       # rad/s, every joint (URDF velocity limit)
 
 # HOME: all joints at 0 = the arm straight up (a wrist singularity, gripper at the ceiling).
@@ -52,13 +54,33 @@ def parse_pose_deg(text):
     if len(vals) != 6:
         raise ValueError(f"home_deg {text!r}: need 6 angles in degrees, got {len(vals)}")
     q = np.radians(vals)
-    lo = LOWER.copy()
-    lo[2] = math.radians(-80)                       # robot limit; LOWER[2] is the 15 deg elbow-up bound of the IK
+    lo = HW_LOWER
     bad = [f"joint{i + 1}={vals[i]:g} (allowed {math.degrees(lo[i]):.0f}..{math.degrees(UPPER[i]):.0f})"
            for i in range(6) if q[i] < lo[i] - 1e-9 or q[i] > UPPER[i] + 1e-9]
     if bad:
         raise ValueError(f"home_deg {text!r}: outside the joint limits: " + ", ".join(bad))
     return q
+
+
+def soft_limits(margin_deg):
+    """Joint ranges that keep `margin_deg` away from the robot's limits.
+    Returns (ik_lo, ik_hi, out_lo, out_hi) [rad]: the IK range (also keeps the 15 deg elbow-up bound) and the range a
+    published command may never leave (the hardware limits minus the margin)."""
+    if not 0.0 <= margin_deg < 45.0:
+        raise ValueError(f"limit_margin_deg must be 0..45, got {margin_deg}")
+    m = math.radians(margin_deg)
+    out_lo, out_hi = HW_LOWER + m, UPPER - m
+    return np.maximum(LOWER, out_lo), out_hi.copy(), out_lo, out_hi
+
+
+def clamp_roll(q6_ref, twist_acc, gain, lo, hi):
+    """Joint-6 target q6_ref + gain * twist_acc clipped to [lo, hi], with anti-windup: when it clips, the accumulated
+    twist is wound back to the limit, so turning the hand back moves the joint at once. Returns (q6, twist_acc)."""
+    q6 = q6_ref + gain * twist_acc
+    clipped = float(np.clip(q6, lo, hi))
+    if clipped != q6 and gain != 0.0:
+        twist_acc = (clipped - q6_ref) / gain
+    return clipped, twist_acc
 
 
 def rot(axis, a):
@@ -206,14 +228,16 @@ def _dls_step(J, e, free, lam, q, q_rest, k_null):
     return step
 
 
-def ik(T_goal, q_seed, w_rot=0.3, iters=60, lam=0.02, q_rest=HOME, k_null=0.05):
+def ik(T_goal, q_seed, w_rot=0.3, iters=60, lam=0.02, q_rest=HOME, k_null=0.05, lower=None, upper=None):
     """Flange pose T_goal (4x4, base_link) -> joint angles [rad] (damped least squares, analytic Jacobian).
     w_rot = 0 -> position only (wrist free, pulled gently towards q_rest).
     Joint limits are handled by pinning: a joint whose step would cross LOWER / UPPER is held at the limit and the
     step is solved again for the remaining joints, so an unreachable target gives the closest reachable pose (the arm
     slides along the limit) instead of a corner posture far from it.
     Returns (q, position_error_m, rotation_error_deg)."""
-    q = np.clip(np.asarray(q_seed, float).copy(), LOWER, UPPER)
+    lo = LOWER if lower is None else np.asarray(lower, float)     # joint range the IK may use (default: the limits)
+    hi = UPPER if upper is None else np.asarray(upper, float)
+    q = np.clip(np.asarray(q_seed, float).copy(), lo, hi)
     rows = 3 if w_rot == 0 else 6
     for _ in range(iters):
         T, J = fk_jac(q)
@@ -225,14 +249,14 @@ def ik(T_goal, q_seed, w_rot=0.3, iters=60, lam=0.02, q_rest=HOME, k_null=0.05):
         for _pass in range(4):
             step = fixed + _dls_step(J, e - J @ fixed, free, lam, q, q_rest, k_null)
             step = np.where(free, np.clip(step, -0.3, 0.3), fixed)
-            bad = free & ((q + step < LOWER) | (q + step > UPPER))
+            bad = free & ((q + step < lo) | (q + step > hi))
             if not bad.any():
                 break
             free &= ~bad                                      # pin them at the limit, re-solve the others
-            fixed[bad] = np.clip(q + step, LOWER, UPPER)[bad] - q[bad]
+            fixed[bad] = np.clip(q + step, lo, hi)[bad] - q[bad]
         if np.linalg.norm(e[:3]) < 1e-4 and np.linalg.norm(e[3:]) <= 1e-3 * w_rot and np.linalg.norm(step) < 1e-4:
             break
-        q = np.clip(q + step, LOWER, UPPER)
+        q = np.clip(q + step, lo, hi)
     T = fk(q)
     pe = float(np.linalg.norm(T_goal[:3, 3] - T[:3, 3]))
     re = float(math.degrees(np.linalg.norm(_log_so3(T_goal[:3, :3] @ T[:3, :3].T))))

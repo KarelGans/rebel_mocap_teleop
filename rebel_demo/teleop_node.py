@@ -36,6 +36,8 @@ Parameters (defaults in brackets)
                           (the launch file gives each teleop node its own topic and joint_merger forwards them)
   publish_joint_states [false]   true = also publish /joint_states (stand-alone testing; the launch uses joint_merger)
   feedback_from_joint_states [false]  true = seed IK from Isaac's joint states instead of last command
+  limit_margin_deg [10]   never command a joint closer than this to its hardware limit (joints 4/6 stop at +-169 deg,
+                          joint 5 at +-85): a real controller can fault or stop at its limits. 0 = use the full range
   limit_warn_mm [5]       warn "joint limit reached" when the IK is further than this from the target and a joint
                           sits at a limit (the elbow-up bound counts); also warns when the workspace box clamps the target
   reanchor_after [2.0]    s of lost tracking before the clutch re-anchors (shorter gaps: hold, keep the anchor)
@@ -67,8 +69,8 @@ from std_msgs.msg import Bool
 from std_srvs.srv import SetBool, Trigger
 from tf2_ros import Buffer, TransformException, TransformListener
 
-from .kinematics import (JOINT_NAMES, LOWER, UPPER, fk, ik, limits_hit, parse_pose_deg, quat_to_matrix, scale_rotation,
-                         twist_about)
+from .kinematics import (JOINT_NAMES, LOWER, clamp_roll, fk, ik, limits_hit, parse_pose_deg, quat_to_matrix,
+                         scale_rotation, soft_limits, twist_about)
 
 
 def matrix_to_quat(R):
@@ -150,6 +152,14 @@ class Teleop(Node):
         self.home_wait = float(d("home_wait", 1.0).value)
         self.skip_home = bool(d("skip_home", False).value)
         self.home = parse_pose_deg(d("home_deg", "0 0 0 0 0 0").value)    # HOME [rad]; raises on bad input
+        self.margin_deg = float(d("limit_margin_deg", 10.0).value)
+        # IK range (soft limits + elbow-up bound) and the range a published command may never leave
+        self.ik_lo, self.ik_hi, self.out_lo, self.out_hi = soft_limits(self.margin_deg)
+        home = np.clip(self.home, self.out_lo, self.out_hi)
+        if not np.allclose(home, self.home):
+            self.get_logger().warn("home_deg is closer than limit_margin_deg to a joint limit; using %s deg instead"
+                                   % np.degrees(home).round(1).tolist())
+            self.home = home
         self.engaged = bool(d("start_engaged", False).value)
         topic = d("command_topic", "/dual_arm/isaac_joint_commands").value
         self.pub_js = bool(d("publish_joint_states", False).value)
@@ -361,21 +371,23 @@ class Teleop(Node):
         if self.roll_follow and self.roll_axis is not None:
             q_rest = self.home.copy()
             q_rest[5] = seed[5]                            # no pull of joint 6 towards HOME: the hand roll owns it
-        q_ik, pe, re = ik(T, seed, w_rot=w_rot, iters=25, q_rest=q_rest)
+        q_ik, pe, re = ik(T, seed, w_rot=w_rot, iters=25, q_rest=q_rest, lower=self.ik_lo, upper=self.ik_hi)
         if self.roll_follow and self.roll_axis is not None:
             # joint 6 spins about the tool axis, so it cannot change the tool position: drive it directly from the
             # twist of the hand about that axis (tilts of the hand contribute ~0), continuous across +-180 deg
             twist = twist_about(R_f @ self.hand_ref[1].T, self.roll_axis)
             self.twist_acc += (twist - self.twist_prev + math.pi) % (2 * math.pi) - math.pi
             self.twist_prev = twist
-            q_ik[5] = float(np.clip(self.q6_ref + self.roll_sign * self.scale_rot * self.twist_acc,
-                                    LOWER[5], UPPER[5]))
-        hits = limits_hit(q_ik) if pe > self.limit_warn else []
+            q_ik[5], self.twist_acc = clamp_roll(self.q6_ref, self.twist_acc, self.roll_sign * self.scale_rot,
+                                                 self.ik_lo[5], self.ik_hi[5])
+        hits = limits_hit(q_ik, self.ik_lo, self.ik_hi) if pe > self.limit_warn else []
         if hits:                                           # a joint limit is what keeps the IK off the target
             self.limit_active = True
+            kind = "soft limit" if self.margin_deg > 0 else "limit"
             what = ", ".join(
-                f"{self.joint_names[i]} at {side} {'elbow-up bound' if (i == 2 and side == 'lower') else 'limit'} "
-                f"{np.degrees(LOWER[i] if side == 'lower' else UPPER[i]):.0f} deg" for i, side in hits)
+                f"{self.joint_names[i]} at {side} "
+                f"{'elbow-up bound' if (i == 2 and side == 'lower' and self.ik_lo[2] == LOWER[2]) else kind} "
+                f"{np.degrees(self.ik_lo[i] if side == 'lower' else self.ik_hi[i]):.0f} deg" for i, side in hits)
             self.get_logger().warn(f"joint limit reached: {what} - target {pe * 1000:.0f} mm out of reach, "
                                    f"moving to the closest reachable pose", throttle_duration_sec=1.0)
         else:
@@ -387,7 +399,10 @@ class Teleop(Node):
                                        throttle_duration_sec=1.0)
         # 6. joint speed limit
         dq = np.clip(q_ik - self.q_cmd, -self.vmax * self.dt, self.vmax * self.dt)
-        self.q_cmd = np.clip(self.q_cmd + dq, LOWER, UPPER)
+        # never past the soft limits; a joint that already is beyond them (e.g. the measured start pose) may only move
+        # back inside, at the speed limit - no jump
+        lo, hi = np.minimum(self.out_lo, self.q_cmd), np.maximum(self.out_hi, self.q_cmd)
+        self.q_cmd = np.clip(self.q_cmd + dq, lo, hi)
         self.publish(self.q_cmd)                           # 7.
 
     def publish(self, q):
