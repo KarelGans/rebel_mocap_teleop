@@ -242,8 +242,6 @@ to move it ([section 12](#12-testing-without-hardware)). Over SSH add `rviz:=fal
 | max_joint_speed_deg | 45 | per-joint speed limit (the real ReBeL maximum) |
 | workspace_min, workspace_max | `-0.7 -0.7 -0.45`, `0.7 0.7 0.95` | clamp of the tool target in the arm base frame (m), widened to include the pose at engage |
 | limit_margin_deg | 10 | never command a joint closer than this (deg) to its hardware limit: joints 1/4/6 stop at +-169, joint 2 at -70..130, joint 3 at 130 (and its 15 deg elbow bound), joint 5 at +-85. Teleop keeps publishing at 60 Hz while a joint sits there. A real controller can fault or freeze at its hard limits. `0` = the full range |
-| limit_recovery | true | when a commanded joint has reached its (soft) limit and the hand still asks for more: move that joint back by `limit_backoff_deg`, re-anchor (hand now <-> robot now) and follow the hand again, so the arm never stays stuck at a limit. `false` = hold at the limit until the hand comes back |
-| limit_backoff_deg | 3 | how far that joint is moved back from its limit before following the hand again |
 | limit_warn_mm | 5 | warn `joint limit reached` when the IK is this far (mm) off the target with a joint at a limit |
 | home_deg | `0 0 0 0 0 0` | start pose of every arm, 6 angles in degrees (e.g. `"0 0 60 0 50 0"`); checked against the joint limits at start |
 | skip_home | false | no start-up move; start from the measured joints (zeros if none arrive); `engage` works at once |
@@ -277,10 +275,6 @@ Node-only parameters (set with `--ros-args -p`): teleop `rate_hz` 60, `stale_tim
 6. Per-joint speed limit (`max_joint_speed_deg`), and the **soft limits**: the IK and the published command never go closer than
    `limit_margin_deg` (10 deg) to a hardware limit. A joint that already is beyond that (e.g. the measured start pose) may only move
    back inside, at the speed limit. The stream keeps going at 60 Hz while a joint sits at its soft limit.
-   **Limit recovery** (`limit_recovery`, on by default): once a commanded joint has *arrived* at its limit and the hand still
-   asks for more (position, or rotation with `orientation:=true`), that joint is moved back by `limit_backoff_deg` (3 deg), then the
-   clutch re-anchors: the hand motion that went beyond the limit is forgotten and the arm follows the hand again at once, in any
-   direction. Pushing further repeats it (the log says `backing off 3 deg, then following the hand again`).
 7. Publish `sensor_msgs/JointState` (`arm_<side>_joint1..6`, radians); `joint_merger` merges all arms and grippers into one
    message on `command_topic`, or on `/dual_arm/isaac_joint_states` when `target:=rviz`.
 
@@ -475,8 +469,7 @@ limit to the closest pose and follows again as soon as the hand returns); the la
 | `No package metadata was found for rebel_demo` | broken install from a failed build: `rm -rf build/rebel_demo install/rebel_demo`, rebuild |
 | `run.sh`: Permission denied | `chmod +x scripts/run.sh` once |
 | **Limits** | |
-| real robot freezes / faults when a joint reaches its limit | the controller stops at its hard limits: keep `limit_margin_deg` (default 10, raise it if your controller's own limits are tighter) and `limit_recovery:=true`. The log should say `soft limit` / `backing off` |
-| arm stays at a limit and does not follow the hand back | `limit_recovery:=false` is set: the hand must first come back as far as it went beyond the limit. Leave it `true` (default) |
+| real robot freezes / faults when a joint reaches its limit | the controller stops at its hard limits: keep `limit_margin_deg` (default 10, raise it if your controller's own limits are tighter). Check the log says `soft limit` |
 | constant `joint limit reached` warnings | the IK is pinned at a joint limit. Common: joint 3 at the 15 deg elbow bound when starting from zeros, joints 4 / 6 at +-179 with `orientation:=true` (singularity), the workspace box (`target clamped by ...`). See [5](#5-orientation-modes) and [12](#12-testing-without-hardware) |
 
 ## Known issues
