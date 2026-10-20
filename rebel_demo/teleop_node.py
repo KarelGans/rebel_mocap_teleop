@@ -26,7 +26,18 @@ Parameters (defaults in brackets)
   scale_trans [1.0]       gain on the hand's translation since engage; `scale` is an alias
   scale_rot [1.0]         gain on the hand's rotation since engage: the wrist rotation with orientation:=true, the joint 6
                           roll with orientation:=semi (unused with orientation:=false)
-  orientation [false]     false = position only (wrist free), true = full pose
+  orientation [false]     false = position only (wrist free), true = full pose with robot_remote's method
+                          (github.com/Patrick-zhuyanxun/robot_remote): task-priority IK (position first, the orientation
+                          only with what is left, never at the cost of the position), a rate-limited command that may lead
+                          the commanded joints by at most max_tool_lead_m / _deg; at a wrist limit the orientation stops
+  rot_axis_sign ["1 1 1"] orientation:=true: sign of the hand's rotation about the robot base x / y / z axes; "-1 1 1"
+                          reverses only the roll about x (the real setup: the tool otherwise twists against your hand)
+  max_tool_rot_speed_deg [90]  orientation:=true: the commanded tool rotation turns at most this fast (deg/s)
+  max_tool_lead_m [0.05]  max_tool_lead_deg [15]  orientation:=true: anti-windup - how far the command may run ahead of
+                          the pose of the commanded joints
+  limit_follow [true]     orientation:=true: at a joint limit (or the workspace box) forget the hand motion / rotation the
+                          arm cannot follow, so it follows again at once when the hand moves another way (false: wait
+                          until the hand is back where the arm stopped, as robot_remote does)
   roll_follow [false]     position only + joint 6 follows the hand's roll about the tool axis (launch: orientation:=semi)
   roll_sign [1.0]         joint6 = joint6 at engage + sign * scale_rot * hand twist; sign -1 flips the direction
   cutoff_hz [4.0]         low-pass cutoff for the hand pose
@@ -70,8 +81,9 @@ from std_msgs.msg import Bool
 from std_srvs.srv import SetBool, Trigger
 from tf2_ros import Buffer, TransformException, TransformListener
 
-from .kinematics import (JOINT_NAMES, LOWER, UPPER, fk, ik, limit_lead, limits_hit, parse_pose_deg, quat_to_matrix,
-                         scale_rotation, twist_about)
+from .kinematics import (JOINT_NAMES, LOWER, UPPER, drop_unreachable, drop_unreachable_rot, fk, flip_rotation, ik,
+                         ik_priority, limit_lead, limits_hit, parse_pose_deg, quat_to_matrix, scale_into_lead,
+                         scale_rotation, toward_point, toward_rot, twist_about)
 
 
 def matrix_to_quat(R):
@@ -148,6 +160,17 @@ class Teleop(Node):
         self.reanchor_after = float(d("reanchor_after", 2.0).value)
         self.max_hand_speed = float(d("max_hand_speed", 2.0).value)
         self.max_tool_speed = float(d("max_tool_speed", 0.5).value)
+        # orientation:=true (robot_remote's method): the commanded rotation turns toward the hand's at most this fast, and
+        # the command may lead what the commanded joints reach by at most max_tool_lead_m / _deg (anti-windup)
+        self.max_rot_speed = math.radians(float(d("max_tool_rot_speed_deg", 90.0).value))
+        self.tool_lead_m = float(d("max_tool_lead_m", 0.05).value)
+        self.tool_lead = math.radians(float(d("max_tool_lead_deg", 15.0).value))
+        self.limit_follow = bool(d("limit_follow", True).value)
+        signs = [float(v) for v in str(d("rot_axis_sign", "1 1 1").value).replace(",", " ").split()]
+        if len(signs) != 3 or any(s not in (1.0, -1.0) for s in signs):
+            raise ValueError(f"rot_axis_sign needs 3 values, each 1 or -1 (x y z of the robot base), got {signs}")
+        self.rot_signs = tuple(signs)
+        self.cmd_R = None                                                 # commanded rotation (orientation:=true)
         self.good_p, self.good_t, self.glitch_since = None, None, None   # outlier gate state
         self.target = None                                                # last IK target position (rate limit)
         self.home_wait = float(d("home_wait", 1.0).value)
@@ -217,7 +240,7 @@ class Teleop(Node):
             return False, msg
         self.engaged = bool(on)
         self.hand_ref = None                # re-anchor on the next cycle
-        self.target = None
+        self.target = self.cmd_R = None
         self.pub_engaged.publish(Bool(data=self.engaged))
         msg = "engaged (RUNNING)" if self.engaged else "released (PAUSED, robot holds)"
         self.get_logger().info(msg)
@@ -232,7 +255,7 @@ class Teleop(Node):
         return res
 
     def on_home(self, req, res):
-        self.engaged, self.homing, self.hand_ref, self.target = False, True, None, None
+        self.engaged, self.homing, self.hand_ref, self.target, self.cmd_R = False, True, None, None, None
         self.pub_engaged.publish(Bool(data=False))
         res.success, res.message = True, "moving to HOME (disengaged)"
         self.get_logger().info(res.message)
@@ -334,6 +357,7 @@ class Teleop(Node):
         if self.hand_ref is None:                          # anchor: hand now <-> robot now
             self.hand_ref = (p_f.copy(), R_f.copy())
             self.robot_ref = fk(self.q_cmd)
+            self.cmd_R = self.robot_ref[:3, :3].copy()
             self.roll_axis = self.robot_ref[:3, 2].copy()          # tool0 z = joint6 axis, base frame
             self.q6_ref, self.twist_prev, self.twist_acc = float(self.q_cmd[5]), 0.0, 0.0
             self.get_logger().info("anchored: tool at (%.3f, %.3f, %.3f) m <-> hand at (%.3f, %.3f, %.3f) m"
@@ -341,7 +365,9 @@ class Teleop(Node):
         T = self.robot_ref.copy()
         T[:3, 3] = self.robot_ref[:3, 3] + self.scale_trans * (p_f - self.hand_ref[0])
         if self.use_orientation:
-            T[:3, :3] = scale_rotation(R_f @ self.hand_ref[1].T, self.scale_rot) @ self.robot_ref[:3, :3]
+            # the hand's rotation since engage (robot base axes), each axis optionally reversed (rot_axis_sign)
+            T[:3, :3] = scale_rotation(flip_rotation(R_f @ self.hand_ref[1].T, self.rot_signs),
+                                       self.scale_rot) @ self.robot_ref[:3, :3]
         # workspace box, widened to contain the anchor pose: engaging never moves the robot
         lo, hi = self.ws_min, self.ws_max
         lo, hi = np.minimum(lo, self.robot_ref[:3, 3]), np.maximum(hi, self.robot_ref[:3, 3])
@@ -361,15 +387,27 @@ class Teleop(Node):
             if n > self.max_tool_speed * self.dt:
                 T[:3, 3] = self.target + step * (self.max_tool_speed * self.dt / n)
         self.target = T[:3, 3].copy()
+        if self.use_orientation:
+            # robot_remote's method: the commanded rotation turns toward the hand's at <= max_tool_rot_speed_deg, and the
+            # command may lead the pose of the commanded joints by at most max_tool_lead_m / _deg (anti-windup: a hand
+            # asking for more than the arm can do never pulls the IK towards a far-away configuration)
+            R_want = T[:3, :3].copy()
+            self.cmd_R = toward_rot(R_want if self.cmd_R is None else self.cmd_R, R_want, self.max_rot_speed * self.dt)
+            ach = fk(self.q_cmd)
+            self.target = toward_point(ach[:3, 3], self.target, self.tool_lead_m)
+            self.cmd_R = toward_rot(ach[:3, :3], self.cmd_R, self.tool_lead)
+            T[:3, 3], T[:3, :3] = self.target, self.cmd_R
         self.publish_target(T)
 
-        # 5. real-time IK, warm-started from the last command
-        w_rot = 0.3 if self.use_orientation else 0.0
-        q_rest = None if self.use_orientation else self.home
+        # 5. real-time IK, warm-started from the last command; full pose: task-priority IK (position first, robot_remote)
+        q_rest = self.home
         if self.roll_follow and self.roll_axis is not None:
             q_rest = self.home.copy()
             q_rest[5] = seed[5]                            # no pull of joint 6 towards HOME: the hand roll owns it
-        q_ik, pe, re = ik(T, seed, w_rot=w_rot, iters=25, q_rest=q_rest)
+        if self.use_orientation:
+            q_ik, pe, re = ik_priority(T, seed)
+        else:
+            q_ik, pe, re = ik(T, seed, w_rot=0.0, iters=25, q_rest=q_rest)
         if self.roll_follow and self.roll_axis is not None:
             # joint 6 spins about the tool axis, so it cannot change the tool position: drive it directly from the
             # twist of the hand about that axis (tilts of the hand contribute ~0), continuous across +-180 deg
@@ -378,21 +416,40 @@ class Teleop(Node):
             self.twist_prev = twist
             q_ik[5] = float(np.clip(self.q6_ref + self.roll_sign * self.scale_rot * self.twist_acc,
                                     LOWER[5], UPPER[5]))
-        hits = limits_hit(q_ik) if pe > self.limit_warn else []
+        pinned = limits_hit(q_ik)
+        follow = self.use_orientation and self.limit_follow       # keep following: orientation:=true only (this branch)
+        # with keep following the unreachable part is dropped every cycle, so the IK is never far off: 2 mm / 1 deg count
+        pos_blocked = bool(pinned) and pe > (0.002 if follow else self.limit_warn)
+        rot_blocked = self.use_orientation and bool(pinned) and re > 1.0   # wrist at a limit: orientation left short
+        hits = pinned if (pos_blocked or rot_blocked) else []
         if hits:                                           # a joint limit is what keeps the IK off the target
             self.limit_active = True
             what = ", ".join(
                 f"{self.joint_names[i]} at {side} {'elbow-up bound' if (i == 2 and side == 'lower') else 'limit'} "
                 f"{np.degrees(LOWER[i] if side == 'lower' else UPPER[i]):.0f} deg" for i, side in hits)
-            self.get_logger().warn(f"joint limit reached: {what} - target {pe * 1000:.0f} mm out of reach, "
-                                   f"moving to the closest reachable pose", throttle_duration_sec=1.0)
+            short = f"{pe * 1000:.0f} mm" + (f" / {re:.0f} deg" if self.use_orientation else "")
+            tail = ("hand motion beyond it is ignored, the arm follows again as soon as the hand moves another way"
+                    if follow else f"target {short} out of reach, moving to the closest reachable pose")
+            self.get_logger().warn(f"joint limit reached: {what} - {tail}", throttle_duration_sec=1.0)
         else:
-            if self.limit_active and pe <= self.limit_warn:
+            if self.limit_active and (not pinned if follow else pe <= self.limit_warn):
                 self.limit_active = False
                 self.get_logger().info("joint limits: target back in range")
             if pe > 0.02:
                 self.get_logger().warn(f"target not reachable ({pe * 1000:.0f} mm off) - moving as close as possible",
                                        throttle_duration_sec=1.0)
+        if follow and self.scale_trans > 0 and (pos_blocked or np.any(np.abs(beyond) > 1e-3)):
+            # keep following: the hand motion past the limit (or the workspace box) is forgotten, so the target stays at
+            # the closest reachable point and the arm follows at once when the hand moves any other way
+            reached = fk(q_ik)[:3, 3]
+            self.hand_ref = (drop_unreachable(self.hand_ref[0], wanted, reached, self.scale_trans), self.hand_ref[1])
+            self.target = reached.copy()
+        if follow and rot_blocked and self.scale_rot > 0:
+            # the same for the orientation: the hand rotation past the limit is forgotten, the wrist turns back at once
+            R_reached = fk(q_ik)[:3, :3]
+            self.hand_ref = (self.hand_ref[0], drop_unreachable_rot(R_f, R_reached, self.robot_ref[:3, :3],
+                                                                    self.scale_rot, self.rot_signs))
+            self.cmd_R = R_reached.copy()
         # 6. joint speed limit: scale ALL joints by the same factor so the step keeps the IK's direction and the tool
         # stays on its path (clipping each joint on its own bends the motion when one joint saturates)
         dq = q_ik - self.q_cmd
@@ -400,9 +457,26 @@ class Teleop(Node):
         max_step = self.vmax * self.dt
         if m > max_step:
             dq *= max_step / m
-        self.q_cmd = np.clip(self.q_cmd + dq, LOWER, UPPER)
-        self.q_cmd = self.hold_lead(self.q_cmd)            # robot behind: never more than max_lead ahead of it
+        q_next = np.clip(self.q_cmd + dq, LOWER, UPPER)
+        if self.use_orientation:                           # full pose: the lead limit shortens the whole step, too
+            q_next = self.hold_lead_path(self.q_cmd, q_next)
+        self.q_cmd = self.hold_lead(q_next)                # robot behind: never more than max_lead ahead of it
         self.publish(self.q_cmd)                           # 7.
+
+    def hold_lead_path(self, q_prev, q_new):
+        """Step q_prev -> q_new shortened as a whole (scale_into_lead) so it stays within max_lead_deg of the fresh
+        measured joints: the arm waits for the slow real arm and the tool keeps its path. q_new if off / no feedback."""
+        age = self.get_clock().now().nanoseconds * 1e-9 - self.t_meas if self.t_meas is not None else None
+        if self.max_lead <= 0 or self.q_meas is None or age > self.fb_timeout:
+            return q_new                                   # hold_lead warns about missing joint states
+        out = scale_into_lead(q_prev, q_new, self.q_meas, self.max_lead)
+        if not np.allclose(out, q_new):
+            lag = np.abs(q_new - self.q_meas)
+            i = int(np.argmax(lag))
+            self.get_logger().warn(
+                f"robot is behind: waiting for it (joint {i + 1} {math.degrees(lag[i]):.0f} deg behind the command, "
+                f"max_lead_deg {math.degrees(self.max_lead):.0f})", throttle_duration_sec=2.0)
+        return out
 
     def hold_lead(self, q):
         """q limited to max_lead_deg ahead of the fresh measured joints (see limit_lead); q itself if off / no feedback."""

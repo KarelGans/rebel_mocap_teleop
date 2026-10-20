@@ -2,9 +2,10 @@
 import math
 
 import numpy as np
+import pytest
 
-from src.rebel_demo.kinematics import (HOME, LOWER, UPPER, fk, ik, limit_lead, parse_pose_deg, quat_to_matrix, rot,
-                                       scale_rotation, twist_about)
+from rebel_demo.kinematics import (HOME, LOWER, UPPER, fk, ik, limit_lead, parse_pose_deg, quat_to_matrix, rot,
+                                   scale_rotation, twist_about)
 
 # the bent-elbow "ready" pose (the former HOME; HOME is now all zeros = arm straight up)
 READY = np.radians([0.0, 13.4, 87.9, 0.0, 78.7, 0.0])
@@ -30,7 +31,7 @@ def test_uniform_joint_scaling_keeps_direction():
 
 
 def test_analytic_jacobian():
-    from src.rebel_demo.kinematics import fk_jac
+    from rebel_demo.kinematics import fk_jac
     q = np.radians([10, 30, 60, -20, 40, 15])
     T, J = fk_jac(q)
     for i in range(6):
@@ -62,7 +63,7 @@ def test_gripper_threshold_hysteresis():
     import importlib.util
     if importlib.util.find_spec("rclpy") is None:
         return
-    from src.rebel_demo.gripper_node import next_state
+    from rebel_demo.gripper_node import next_state
     assert next_state(0.02, 1, 0.06, 0.01) == 0           # near -> close
     assert next_state(0.10, 0, 0.06, 0.01) == 1           # far -> open
     assert next_state(0.062, 0, 0.06, 0.01) == 0          # inside dead band -> keep
@@ -80,7 +81,7 @@ def test_gripper_orientation_angle():
     import importlib.util
     if importlib.util.find_spec("rclpy") is None:
         return
-    from src.rebel_demo.gripper_node import next_state_angle, quat_mul, rotation_angle_deg
+    from rebel_demo.gripper_node import next_state_angle, quat_mul, rotation_angle_deg
     assert abs(rotation_angle_deg((0, 0, 0, 1))) < 1e-9
     for axis in [(1, 0, 0), (0, 1, 0), (0, 0, 1), (1, 1, 0)]:
         assert abs(rotation_angle_deg(_q(axis, 180)) - 180) < 1e-6          # flipped about any axis
@@ -102,7 +103,7 @@ def test_gripper_angle_bands():
     import importlib.util
     if importlib.util.find_spec("rclpy") is None:
         return
-    from src.rebel_demo.gripper_node import next_state_angle
+    from rebel_demo.gripper_node import next_state_angle
     assert next_state_angle(10, 0, 30, 100) == 1           # same plane -> open
     assert next_state_angle(170, 1, 30, 100) == 0          # reversed -> closed
     assert next_state_angle(60, 1, 30, 100) == 1           # in between -> keep
@@ -114,7 +115,7 @@ def test_keyboard_debounce():
     import importlib.util
     if importlib.util.find_spec("rclpy") is None:
         return
-    from src.rebel_demo.keyboard_node import KeyDebounce
+    from rebel_demo.keyboard_node import KeyDebounce
     d = KeyDebounce(0.3)
     assert d(10.0) is True
     assert d(10.1) is False                 # key repeat of a held SPACE
@@ -122,7 +123,7 @@ def test_keyboard_debounce():
 
 
 def test_limits_hit():
-    from src.rebel_demo.kinematics import limits_hit
+    from rebel_demo.kinematics import limits_hit
     assert limits_hit(READY) == []                                   # READY is well inside every limit
     q = READY.copy()
     q[1], q[2] = UPPER[1], LOWER[2]                                 # shoulder at its upper limit, elbow at the bound
@@ -170,7 +171,7 @@ def test_parse_pose_deg_and_start_pose():
         except ValueError:
             continue
         raise AssertionError(f"accepted {bad!r}")                             # joint5 120 > 95; joint3 -100 < -80
-    from src.rebel_demo.kinematics import limits_hit
+    from rebel_demo.kinematics import limits_hit
     assert limits_hit(q) == []                                               # well inside every limit
     T = fk(q)
     assert np.allclose(T[:3, 3], [0.36, 0, 0.33], atol=0.01)
@@ -228,3 +229,125 @@ def _follow(max_lead_deg, seconds=5.0, rate=60.0):
 def test_lead_limit_keeps_slow_follower_close():
     assert _follow(0.0) > 1.75                                                # without it the follower would latch
     assert _follow(20.0) <= math.radians(20) + 1e-9
+
+
+# ---------------------------------------------------------------- orientation:=true: robot_remote's method
+from rebel_demo.kinematics import (_log_so3, drop_unreachable, drop_unreachable_rot, flip_rotation,  # noqa: E402
+                                   ik_priority, limits_hit, toward_point, toward_rot)
+
+HOME_REAL = np.radians([0, 0, 60, 0, 50, 0])
+
+
+def test_flip_rotation_reverses_only_the_chosen_axis():
+    x, y, z = np.eye(3)
+    for axis, kept in ((x, False), (y, True), (z, True)):
+        rv = _log_so3(flip_rotation(rot(axis, 0.5), (-1, 1, 1)))
+        assert np.allclose(rv, axis * 0.5 * (1 if kept else -1))
+    R = rot(np.array([0.3, 0.5, 0.8]) / np.linalg.norm([0.3, 0.5, 0.8]), 2.0)
+    assert np.allclose(flip_rotation(flip_rotation(R, (-1, 1, 1)), (-1, 1, 1)), R)      # its own inverse
+    assert np.allclose(flip_rotation(R, (1, 1, 1)), R)
+
+
+def test_ik_priority_reaches_reachable_poses():
+    rng = np.random.default_rng(1)
+    for _ in range(30):
+        q_goal = rng.uniform(LOWER + 0.2, UPPER - 0.2)
+        q_goal[4] = rng.uniform(0.3, 1.4)                    # wrist bent the home way (no singularity at joint 5 = 0)
+        seed = np.clip(q_goal + rng.normal(0, 0.05, 6), LOWER, UPPER)
+        _, pe, re = ik_priority(fk(q_goal), seed)
+        assert pe < 1e-4 and re < 0.05
+
+
+def test_ik_priority_keeps_the_position_at_a_wrist_limit():
+    """Twist 30 deg past joint 6's limit: joint 6 stops there, the tool stays put and no other joint takes it over."""
+    q0 = HOME_REAL.copy()
+    q0[5] = UPPER[5] - math.radians(9)
+    T = fk(q0)
+    T[:3, :3] = rot(T[:3, 2], math.radians(30)) @ T[:3, :3]
+    q, pe, re = ik_priority(T, q0)
+    assert q[5] == pytest.approx(UPPER[5]) and pe < 1e-4 and re == pytest.approx(21.0, abs=0.5)
+    assert np.degrees(np.abs(q - q0)[:5]).max() < 0.5
+
+
+def test_drop_unreachable_rot_maps_onto_the_reached_rotation():
+    R_ref = fk(HOME_REAL)[:3, :3]
+    R_hand = rot(np.array([0.3, 0.5, 0.8]) / np.linalg.norm([0.3, 0.5, 0.8]), 0.7)
+    R_reached = rot(np.array([1.0, 0, 0]), 0.4) @ R_ref
+    for s, signs in ((1.0, (1, 1, 1)), (0.5, (-1, 1, 1)), (2.0, (1, -1, 1))):
+        anchor = drop_unreachable_rot(R_hand, R_reached, R_ref, s, signs)
+        assert np.allclose(scale_rotation(flip_rotation(R_hand @ anchor.T, signs), s) @ R_ref, R_reached, atol=1e-9)
+
+
+def _replay_full_pose(axis, amp_deg, signs=(1, 1, 1), rate_deg=30.0):
+    """teleop's orientation:=true cycle on this branch (rot_axis_sign, rate limit, lead clamp, ik_priority, keep following,
+    all joints scaled together), hand position fixed, the hand turns amp_deg about `axis` (base frame) and back.
+    Returns (s until the arm reacts after the hand turned back, max tool offset [m], q min, q max, tool rotation at the
+    turn point as a rotation vector)."""
+    dt, vmax = 1 / 60, math.radians(45)
+    q_cmd = HOME_REAL.copy()
+    ref = fk(q_cmd)
+    href_R, target, cmd_R = np.eye(3), ref[:3, 3].copy(), ref[:3, :3].copy()
+    half = amp_deg / rate_deg
+    qs, off, rv_turn = [], 0.0, None
+    for k in range(int((2 * half + 1.0) / dt)):
+        t = k * dt
+        R_h = rot(axis, math.radians(rate_deg) * (min(t, half) - min(max(0.0, t - half), half)))
+        target = toward_point(target, ref[:3, 3], 0.5 * dt)
+        cmd_R = toward_rot(cmd_R, flip_rotation(R_h @ href_R.T, signs) @ ref[:3, :3], math.radians(90) * dt)
+        ach = fk(q_cmd)
+        target = toward_point(ach[:3, 3], target, 0.05)
+        cmd_R = toward_rot(ach[:3, :3], cmd_R, math.radians(15))
+        T = np.eye(4)
+        T[:3, 3], T[:3, :3] = target, cmd_R
+        q_ik, pe, re = ik_priority(T, q_cmd)
+        if limits_hit(q_ik) and re > 1.0:
+            R_reached = fk(q_ik)[:3, :3]
+            href_R, cmd_R = drop_unreachable_rot(R_h, R_reached, ref[:3, :3], 1.0, signs), R_reached.copy()
+        dq = q_ik - q_cmd
+        m = float(np.max(np.abs(dq)))
+        q_cmd = np.clip(q_cmd + (dq * (vmax * dt / m) if m > vmax * dt else dq), LOWER, UPPER)
+        qs.append(q_cmd.copy())
+        off = max(off, float(np.linalg.norm(fk(q_cmd)[:3, 3] - ref[:3, 3])))
+        if rv_turn is None and t >= half:
+            rv_turn = _log_so3(fk(q_cmd)[:3, :3] @ ref[:3, :3].T)
+    turn = int(half / dt)
+    back = next(i for i in range(turn, len(qs)) if np.degrees(np.max(np.abs(qs[i] - qs[turn]))) > 2.0)
+    qs = np.degrees(np.array(qs))
+    return (back - turn) * dt, off, qs.min(0), qs.max(0), rv_turn
+
+
+def test_full_pose_hand_turning_past_a_limit():
+    """The case from the real robot (2026-10-21): with orientation:=true the arm moved 0.8 m while the hand only turned
+    past the wrist's limits. Now the tool stays where the hand puts it and the wrist turns back at once."""
+    ref = fk(HOME_REAL)
+    for axis in (ref[:3, 2], ref[:3, 1], ref[:3, 0], np.array([0, 0, 1.0])):    # tool z / y / x, base z
+        back, off, _, _, _ = _replay_full_pose(axis, 300)
+        assert off < 0.005 and back < 0.25
+    _, _, qmin, qmax, _ = _replay_full_pose(ref[:3, 2], 300)                  # twist past joint 6: only joint 6 moves
+    assert np.all((qmax - qmin)[:5] < 1.0) and qmax[5] == pytest.approx(math.degrees(UPPER[5]), abs=0.1)
+
+
+def test_rot_axis_sign_reverses_the_roll_only():
+    """rot_axis_sign "-1 1 1" (run.sh real): a roll of the hand about the base x axis turns the tool the other way about
+    x; a turn about the base z axis is unchanged."""
+    x, z = np.eye(3)[0], np.eye(3)[2]
+    *_, rv = _replay_full_pose(x, 40, signs=(-1, 1, 1))
+    assert rv[0] == pytest.approx(-math.radians(40), abs=math.radians(2)) and abs(rv[1]) < 0.02 and abs(rv[2]) < 0.02
+    *_, rv = _replay_full_pose(x, 40)
+    assert rv[0] == pytest.approx(math.radians(40), abs=math.radians(2))
+    *_, rv = _replay_full_pose(z, 40, signs=(-1, 1, 1))
+    assert rv[2] == pytest.approx(math.radians(40), abs=math.radians(2))
+
+
+def test_scale_into_lead_keeps_the_step_direction():
+    from rebel_demo.kinematics import scale_into_lead
+    lead = math.radians(20)
+    q_prev, q_meas = np.zeros(6), np.zeros(6)
+    q_new = np.radians([5, 0, 0, 40, 0, 10])                  # joint 4 would end 40 deg ahead of the robot
+    q = scale_into_lead(q_prev, q_new, q_meas, lead)
+    assert np.allclose(q, q_new * 0.5)                        # every joint shortened by the same factor (direction kept)
+    assert np.all(np.abs(q - q_meas) <= lead + 1e-12)
+    far = np.radians([0, 0, 0, 30, 0, 0])                     # already 30 deg ahead: may only move back
+    assert np.allclose(scale_into_lead(far, far + 0.01, q_meas, lead), far)
+    assert np.allclose(scale_into_lead(far, far - 0.01, q_meas, lead), far - 0.01)
+    assert np.allclose(scale_into_lead(q_prev, q_new, None, lead), q_new)            # no feedback: unchanged

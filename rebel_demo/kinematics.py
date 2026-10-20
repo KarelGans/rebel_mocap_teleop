@@ -247,3 +247,106 @@ def ik(T_goal, q_seed, w_rot=0.3, iters=60, lam=0.02, q_rest=HOME, k_null=0.05):
     pe = float(np.linalg.norm(T_goal[:3, 3] - T[:3, 3]))
     re = float(math.degrees(np.linalg.norm(_log_so3(T_goal[:3, :3] @ T[:3, :3].T))))
     return q, pe, re
+
+
+# ---------------------------------------------------------------- full pose (orientation:=true): robot_remote's method
+# github.com/Patrick-zhuyanxun/robot_remote, quest_teleop/quest_arm_teleop.py (IK) and quest_dual_arm_teleop.py
+# (rate-limited Cartesian command, anti-windup lead clamp). Same functions as on branch dev-UI (a6cf63b).
+def ik_priority(T_goal, q_seed, lower=None, upper=None, iters=30, damping=0.02, rot_weight=1.0, tol=1e-4):
+    """Task-priority damped-least-squares IK (robot_remote's SerialChain.ik): position is the primary task, orientation
+    is solved in the null space of the position task, so an orientation the arm cannot realise never moves the tool.
+    A joint sitting on a limit and pushed further by the position step is frozen for that iteration (the position slides
+    along the limit). One change: the orientation step is shortened so that no joint leaves its range, instead of
+    re-solving it with the other joints. At a wrist limit the orientation is left short and the arm does not reconfigure
+    (re-solving made joints 4 / 5 travel up to 100 deg and the tool wander 0.7 m while the hand only turned).
+    Returns (q, position_error_m, rotation_error_deg) like ik()."""
+    lo = LOWER if lower is None else np.asarray(lower, float)
+    hi = UPPER if upper is None else np.asarray(upper, float)
+    q = np.clip(np.asarray(q_seed, float).copy(), lo, hi)
+    lam2 = damping ** 2
+    for _ in range(iters):
+        T, J = fk_jac(q)
+        e_p = T_goal[:3, 3] - T[:3, 3]
+        e_r = rot_weight * _log_so3(T_goal[:3, :3] @ T[:3, :3].T)
+        if np.linalg.norm(e_p) < tol and np.linalg.norm(e_r) < tol:
+            break
+        free = np.ones(6, bool)
+        for _pass in range(2):
+            jp = J[:3] * free
+            jp_pinv = jp.T @ np.linalg.inv(jp @ jp.T + lam2 * np.eye(3))
+            dq1 = jp_pinv @ e_p
+            # 1e-9: joint 6 does not move the tool point (dq1 ~ 1e-17 noise); freezing it on that noise would hand its
+            # rotation to the other joints
+            blocked = free & (((q <= lo + 1e-6) & (dq1 < -1e-9)) | ((q >= hi - 1e-6) & (dq1 > 1e-9)))
+            if not blocked.any():
+                break
+            free &= ~blocked
+        jr = J[3:] * free
+        null = np.eye(6) - jp_pinv @ jp
+        jr_n = jr @ null
+        dq2 = null @ jr_n.T @ np.linalg.solve(jr_n @ jr_n.T + lam2 * np.eye(3), e_r - jr @ dq1)
+        dq1, dq2 = dq1 * free, dq2 * free
+        base = np.clip(q + dq1, lo, hi)
+        s = 1.0                                       # largest share of the orientation step that stays in range
+        for j in np.nonzero(np.abs(dq2) > 1e-12)[0]:
+            s = min(s, max(0.0, ((hi[j] if dq2[j] > 0 else lo[j]) - base[j]) / dq2[j]))
+        q = np.clip(base + s * dq2, lo, hi)
+    T = fk(q)
+    pe = float(np.linalg.norm(T_goal[:3, 3] - T[:3, 3]))
+    re = float(math.degrees(np.linalg.norm(_log_so3(T_goal[:3, :3] @ T[:3, :3].T))))
+    return q, pe, re
+
+
+def toward_point(p_from, p_to, max_dist):
+    """p_from moved toward p_to by at most max_dist (rate limit; anti-windup lead clamp with p_from = the reached point)."""
+    p_from, p_to = np.asarray(p_from, float), np.asarray(p_to, float)
+    d = p_to - p_from
+    n = float(np.linalg.norm(d))
+    return p_to.copy() if n <= max_dist else p_from + d * (max_dist / n)
+
+
+def toward_rot(R_from, R_to, max_angle):
+    """R_from turned toward R_to by at most max_angle [rad] about their common axis (rate limit / lead clamp)."""
+    rv = _log_so3(np.asarray(R_to, float) @ np.asarray(R_from, float).T)
+    a = float(np.linalg.norm(rv))
+    return np.array(R_to, float) if a <= max_angle else rot(rv / a, max_angle) @ R_from
+
+
+def flip_rotation(R, signs):
+    """Rotation R with its rotation-vector components (base-frame x, y, z) multiplied by `signs` (+-1 each): e.g.
+    (-1, 1, 1) reverses the turn about x and keeps the turns about y and z. Its own inverse: flip(flip(R)) = R."""
+    rv = np.asarray(signs, float) * _log_so3(np.asarray(R, float))
+    a = float(np.linalg.norm(rv))
+    return np.eye(3) if a < 1e-12 else rot(rv / a, a)
+
+
+def drop_unreachable(hand_ref_p, wanted_p, reached_p, scale_trans):
+    """Keep following at a limit: move the hand anchor so that the mapped target (anchor-relative hand motion x scale)
+    equals the point the arm can actually reach. Returns the new anchor position."""
+    return np.asarray(hand_ref_p, float) + (np.asarray(wanted_p, float) - np.asarray(reached_p, float)) / scale_trans
+
+
+def drop_unreachable_rot(R_hand, R_reached, R_robot_ref, scale_rot, signs=(1.0, 1.0, 1.0)):
+    """Keep following at a limit, rotation: the hand anchor rotation that makes the mapped target
+    scale_rotation(flip_rotation(R_hand @ anchor.T, signs), scale_rot) @ R_robot_ref equal the rotation the arm reaches.
+    The hand rotation beyond the limit is forgotten, so the wrist follows again as soon as the hand turns back."""
+    E = scale_rotation(np.asarray(R_reached, float) @ np.asarray(R_robot_ref, float).T, 1.0 / scale_rot)
+    if any(s < 0 for s in signs):
+        E = flip_rotation(E, signs)
+    return E.T @ np.asarray(R_hand, float)
+
+
+def scale_into_lead(q_prev, q_new, q_meas, max_lead):
+    """The step q_prev -> q_new shortened (all joints by the same factor) so no joint leaves q_meas +- max_lead that was
+    inside it; a joint already outside may only move back. Like limit_lead, but keeps the step's direction, so the tool
+    stays on its path while the slow real arm catches up (per-joint clipping bent the path by ~15 mm in a wrist turn)."""
+    q_prev, q_new = np.asarray(q_prev, float), np.asarray(q_new, float)
+    if q_meas is None or max_lead <= 0:
+        return q_new.copy()
+    lo, hi = np.asarray(q_meas, float) - max_lead, np.asarray(q_meas, float) + max_lead
+    d = q_new - q_prev
+    s = 1.0
+    for j in np.nonzero(np.abs(d) > 1e-12)[0]:
+        room = (hi[j] if d[j] > 0 else lo[j]) - q_prev[j]
+        s = min(s, max(0.0, room / d[j]))
+    return q_prev + s * d
