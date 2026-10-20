@@ -38,6 +38,10 @@ Parameters (defaults in brackets)
   feedback_from_joint_states [false]  true = seed IK from Isaac's joint states instead of last command
   limit_margin_deg [10]   never command a joint closer than this to its hardware limit (joints 4/6 stop at +-169 deg,
                           joint 5 at +-85): a real controller can fault or stop at its limits. 0 = use the full range
+  limit_recovery [true]   when a commanded joint has reached its limit and the hand still asks for more: move that joint
+                          back by limit_backoff_deg, then re-anchor (hand now <-> robot now) and follow the hand again, so
+                          the arm never stays stuck at a limit; false = hold at the limit until the hand comes back
+  limit_backoff_deg [3]   how far the joint is moved back from the limit before following the hand again
   limit_warn_mm [5]       warn "joint limit reached" when the IK is further than this from the target and a joint
                           sits at a limit (the elbow-up bound counts); also warns when the workspace box clamps the target
   reanchor_after [2.0]    s of lost tracking before the clutch re-anchors (shorter gaps: hold, keep the anchor)
@@ -144,6 +148,9 @@ class Teleop(Node):
         self.ws_max = np.array(d("workspace_max", [0.7, 0.7, 0.95]).value, float)
         self.limit_warn = float(d("limit_warn_mm", 5.0).value) * 1e-3
         self.limit_active = False
+        self.limit_recovery = bool(d("limit_recovery", True).value)
+        self.backoff = math.radians(float(d("limit_backoff_deg", 3.0).value))
+        self.recover_target = None         # joint pose to back off to after a limit, then re-anchor
         self.reanchor_after = float(d("reanchor_after", 2.0).value)
         self.max_hand_speed = float(d("max_hand_speed", 2.0).value)
         self.max_tool_speed = float(d("max_tool_speed", 0.5).value)
@@ -219,6 +226,7 @@ class Teleop(Node):
             self.get_logger().warn(msg)
             return False, msg
         self.engaged = bool(on)
+        self.recover_target = None
         self.hand_ref = None                # re-anchor on the next cycle
         self.target = None
         self.pub_engaged.publish(Bool(data=self.engaged))
@@ -332,6 +340,13 @@ class Teleop(Node):
         if not self.engaged:
             self.publish(self.q_cmd)
             return
+        if self.recover_target is not None:                # backing off from a joint limit
+            self.move_towards(self.recover_target)
+            if np.max(np.abs(self.recover_target - self.q_cmd)) < 1e-6:
+                # re-anchor: the hand motion that went beyond the limit is forgotten, the arm follows the hand again
+                self.recover_target, self.hand_ref, self.target, self.limit_active = None, None, None, False
+                self.get_logger().info("backed off from the joint limit - following the hand again")
+            return
         # 4. mapping
         if self.hand_ref is None:                          # anchor: hand now <-> robot now
             self.hand_ref = (p_f.copy(), R_f.copy())
@@ -380,7 +395,21 @@ class Teleop(Node):
             self.twist_prev = twist
             q_ik[5], self.twist_acc = clamp_roll(self.q6_ref, self.twist_acc, self.roll_sign * self.scale_rot,
                                                  self.ik_lo[5], self.ik_hi[5])
-        hits = limits_hit(q_ik, self.ik_lo, self.ik_hi) if pe > self.limit_warn else []
+        off_target = pe > self.limit_warn or (self.use_orientation and re > 5.0)
+        hits = limits_hit(q_ik, self.ik_lo, self.ik_hi) if off_target else []
+        # recovery: only once the COMMANDED joint has arrived at that limit (not while it is still travelling there)
+        at_limit = [h for h in limits_hit(self.q_cmd, self.ik_lo, self.ik_hi) if h in hits] if self.limit_recovery else []
+        if at_limit:
+            back = self.q_cmd.copy()
+            for i, side in at_limit:
+                back[i] = max(back[i], self.ik_lo[i] + self.backoff) if side == "lower" else \
+                    min(back[i], self.ik_hi[i] - self.backoff)
+            self.recover_target = np.clip(back, np.minimum(self.out_lo, self.q_cmd), np.maximum(self.out_hi, self.q_cmd))
+            names = ", ".join(f"{self.joint_names[i]} ({side})" for i, side in at_limit)
+            self.get_logger().warn(f"joint limit: {names} - backing off {np.degrees(self.backoff):.0f} deg, then following "
+                                   f"the hand again", throttle_duration_sec=1.0)
+            self.move_towards(self.recover_target)
+            return
         if hits:                                           # a joint limit is what keeps the IK off the target
             self.limit_active = True
             kind = "soft limit" if self.margin_deg > 0 else "limit"
@@ -398,12 +427,15 @@ class Teleop(Node):
                 self.get_logger().warn(f"target not reachable ({pe * 1000:.0f} mm off) - moving as close as possible",
                                        throttle_duration_sec=1.0)
         # 6. joint speed limit
-        dq = np.clip(q_ik - self.q_cmd, -self.vmax * self.dt, self.vmax * self.dt)
-        # never past the soft limits; a joint that already is beyond them (e.g. the measured start pose) may only move
-        # back inside, at the speed limit - no jump
+        self.move_towards(q_ik)                            # 7. publish
+
+    def move_towards(self, q_goal):
+        """One cycle towards q_goal at the joint speed limit, then publish. Never past the soft limits; a joint that
+        already is beyond them (e.g. the measured start pose) may only move back inside, at the speed limit - no jump."""
+        dq = np.clip(q_goal - self.q_cmd, -self.vmax * self.dt, self.vmax * self.dt)
         lo, hi = np.minimum(self.out_lo, self.q_cmd), np.maximum(self.out_hi, self.q_cmd)
         self.q_cmd = np.clip(self.q_cmd + dq, lo, hi)
-        self.publish(self.q_cmd)                           # 7.
+        self.publish(self.q_cmd)
 
     def publish(self, q):
         msg = JointState()
