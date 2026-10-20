@@ -36,8 +36,9 @@ Parameters (defaults in brackets)
                           (the launch file gives each teleop node its own topic and joint_merger forwards them)
   publish_joint_states [false]   true = also publish /joint_states (stand-alone testing; the launch uses joint_merger)
   feedback_from_joint_states [false]  true = seed IK from Isaac's joint states instead of last command
-  limit_margin_deg [10]   never command a joint closer than this to its hardware limit (joints 4/6 stop at +-169 deg,
-                          joint 5 at +-85): a real controller can fault or stop at its limits. 0 = use the full range
+  limit_margin_deg [1]    never publish a joint closer than this to its hardware limit (joints 1/4/6 stop at +-178 deg,
+                          joints 2/3 at -79..139, joint 5 at +-94): a real controller can fault or stop at its limits.
+                          The IK uses the same range. 0 = use the full range
   limit_warn_mm [5]       warn "joint limit reached" when the IK is further than this from the target and a joint
                           sits at a limit (the elbow-up bound counts); also warns when the workspace box clamps the target
   reanchor_after [2.0]    s of lost tracking before the clutch re-anchors (shorter gaps: hold, keep the anchor)
@@ -152,7 +153,7 @@ class Teleop(Node):
         self.home_wait = float(d("home_wait", 1.0).value)
         self.skip_home = bool(d("skip_home", False).value)
         self.home = parse_pose_deg(d("home_deg", "0 0 0 0 0 0").value)    # HOME [rad]; raises on bad input
-        self.margin_deg = float(d("limit_margin_deg", 10.0).value)
+        self.margin_deg = float(d("limit_margin_deg", 1.0).value)
         # IK range (soft limits + elbow-up bound) and the range a published command may never leave
         self.ik_lo, self.ik_hi, self.out_lo, self.out_hi = soft_limits(self.margin_deg)
         home = np.clip(self.home, self.out_lo, self.out_hi)
