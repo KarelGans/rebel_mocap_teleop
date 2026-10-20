@@ -261,6 +261,7 @@ One window instead of the driver, teleop, keyboard and calibrate terminals (need
 | cutoff_hz | 4.0 | low-pass cutoff on the hand pose; lower = smoother but more lag |
 | max_joint_speed_deg | 45 | per-joint speed limit (the real ReBeL maximum) |
 | workspace_min, workspace_max | `-0.7 -0.7 -0.45`, `0.7 0.7 0.95` | clamp of the tool target in the arm base frame (m), widened to include the pose at engage |
+| limit_margin_deg | 10 | never command a joint closer than this (deg) to its hardware limit: joints 1/4/6 stop at +-169, joint 2 at -70..130, joint 3 at 130 (and its 15 deg elbow bound), joint 5 at +-85. Teleop keeps publishing at 60 Hz while a joint sits there. A real controller can fault or freeze at its hard limits. `0` = the full range |
 | limit_warn_mm | 5 | warn `joint limit reached` when the IK is this far (mm) off the target with a joint at a limit |
 | home_deg | `0 0 0 0 0 0` | start pose of every arm, 6 angles in degrees (e.g. `"0 0 60 0 50 0"`); checked against the joint limits at start |
 | skip_home | false | no start-up move; start from the measured joints (zeros if none arrive); `engage` works at once |
@@ -291,7 +292,9 @@ Node-only parameters (set with `--ros-args -p`): teleop `rate_hz` 60, `stale_tim
    deliberate bound in `kinematics.py`): in front of the arm every elbow-up solution has joint 3 > 0, and the stretched arm
    (joint 3 = 0) would let it flip to elbow-down. A target needing a straighter arm is not reached; the log says
    `joint limit reached: ... elbow-up bound 15 deg` (any joint at a limit is named the same way).
-6. Per-joint speed limit (`max_joint_speed_deg`).
+6. Per-joint speed limit (`max_joint_speed_deg`), and the **soft limits**: the IK and the published command never go closer than
+   `limit_margin_deg` (10 deg) to a hardware limit. A joint that already is beyond that (e.g. the measured start pose) may only move
+   back inside, at the speed limit. The stream keeps going at 60 Hz while a joint sits at its soft limit.
 7. Publish `sensor_msgs/JointState` (`arm_<side>_joint1..6`, radians); `joint_merger` merges all arms and grippers into one
    message on `command_topic`, or on `/dual_arm/isaac_joint_states` when `target:=rviz`.
 
@@ -487,10 +490,11 @@ limit to the closest pose and follows again as soon as the hand returns); the la
 | `No package metadata was found for rebel_demo` | broken install from a failed build: `rm -rf build/rebel_demo install/rebel_demo`, rebuild |
 | `run.sh`: Permission denied | `chmod +x scripts/run.sh` once |
 | **Limits** | |
+| real robot freezes / faults when a joint reaches its limit | the controller stops at its hard limits: keep `limit_margin_deg` (default 10, raise it if your controller's own limits are tighter). Check the log says `soft limit` |
 | constant `joint limit reached` warnings | the IK is pinned at a joint limit. Common: joint 3 at the 15 deg elbow bound when starting from zeros, joints 4 / 6 at +-179 with `orientation:=true` (singularity), the workspace box (`target clamped by ...`). See [5](#5-orientation-modes) and [12](#12-testing-without-hardware) |
 
 ## Known issues
-- No collision checking; no soft margin before the joint limits (joints 4 and 6 can still be driven to +-179 deg with `orientation:=true`).
+- No collision checking. Joints stop `limit_margin_deg` (10 deg) before their hardware limits; with `orientation:=true` joints 4 and 6 can still sit at +-169 deg for a long time (the straight-wrist singularity).
 - IK targets `tool0`, not the point between the XEG jaws; with `orientation:=true` the fingertips swing.
 - The wrist side (joint 5 sign) is not constrained; only the elbow is (joint 3 >= 15 deg).
 - `fake_state` mirrors the commands, it does not measure the arm. The XEG open / closed carriage values are the model joint limits (16.5 mm travel per jaw): check against the datasheet.
