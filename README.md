@@ -168,7 +168,9 @@ ros2 launch rebel_demo teleop.launch.py target:=isaac rig:=both rviz:=false scal
   your hand moves another way (`limit_follow`).
 - `robot_ypr` turns the robot frame to match how you stand ([2.5](#25-align-the-robot-with-how-you-stand)).
 - Keep the whole command on one logical line (`\` at the line ends) and quote values that contain spaces.
-- Single arm: `rig:=left` (uses `left_hand_frame` / `left_gripper_frame`) or `rig:=right` (uses `right_*`); drop the other side's arguments.
+- Single arm: add `rig:=left` (uses `left_hand_frame` / `left_gripper_frame`) or `rig:=right` (uses `right_*`), e.g.
+  `run.sh real-ext rig:=left`; the other side's arguments are then ignored. `run.sh keyboard` and `run.sh calibrate` find the
+  running arm(s) by themselves (start them after the launch).
 - **The robot PC publishes the arm TF on the same ROS domain** (its own `robot_state_publisher`, MoveIt, RViz): then replace
   `fake_state:=true` by `robot_tf:=external` (this is `run.sh real-ext`). Teleop then does not start a second robot model, which
   would fight the robot's frames (same frame names, other timestamps: `TF_OLD_DATA` flood, lag, stale holds). It reads the
@@ -369,7 +371,7 @@ close it; the jaws then move to the closed / open carriage position at `max_spee
   open and **calibrate once** (that pose counts as 0 deg; not saved, repeat after each launch):
   ```bash
   ros2 service call /rebel_gripper_left/calibrate  std_srvs/srv/Trigger     # rig:=left/right: /rebel_gripper/calibrate
-  ros2 service call /rebel_gripper_right/calibrate std_srvs/srv/Trigger     # or: scripts/run.sh calibrate
+  ros2 service call /rebel_gripper_right/calibrate std_srvs/srv/Trigger     # or: scripts/run.sh calibrate (one or both arms)
   ros2 topic echo /rebel_gripper_left/angle_deg                              # tune the two angles with this
   ```
   The angle includes any rotation between the two bodies, so keep both rigidly fixed to your hand and only flip the finger body.

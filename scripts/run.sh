@@ -11,6 +11,7 @@
 #   ui         the GUI: start/stop driver + teleop, status lights, engage/pause buttons, settings profiles (SPACE pauses)
 #   keyboard   SPACE = pause/resume both arms, l / r = left / right arm only, q = quit (own terminal)
 #   calibrate  save the open-hand pose of both grippers (hold both hands open, launch must be running)
+#              keyboard and calibrate use the arms the running launch has: both, or one with rig:=left / right
 #   lag        how far the real arm lags behind teleop's commands (tools/lag_probe.py: passive, publishes nothing;
 #              run it in its own terminal while you move the hand), e.g. run.sh lag --arm right
 #   driver     start the OptiTrack (mocap4r2) driver
@@ -50,6 +51,9 @@ fi
 
 echo "[run.sh] $cmd | ROS_DOMAIN_ID=$ROS_DOMAIN_ID | workspace $WS" >&2
 
+# nodes of the running launch, comma-separated: rig:=both -> /<name>_left,/<name>_right; rig:=left / right -> /<name>
+running_nodes() { ros2 node list --no-daemon --spin-time 2 2>/dev/null | grep -xE "/$1(_left|_right)?" | sort | paste -sd, || true; }
+
 case "$cmd" in
   real)
     exec ros2 launch rebel_demo teleop.launch.py target:=isaac rig:=both rviz:=false scale_trans:=1.0 cutoff_hz:=6.0 \
@@ -78,11 +82,15 @@ case "$cmd" in
     exec ros2 run rebel_demo rebel_ui "$@"
     ;;
   keyboard)
-    exec ros2 run rebel_demo teleop_keyboard --ros-args -p teleop:=/rebel_teleop_left,/rebel_teleop_right "$@"
+    nodes="$(running_nodes rebel_teleop)"
+    nodes="${nodes:-/rebel_teleop_left,/rebel_teleop_right}"      # launch not up yet: assume both arms
+    echo "[run.sh] keyboard controls $nodes" >&2
+    exec ros2 run rebel_demo teleop_keyboard --ros-args -p teleop:="$nodes" "$@"
     ;;
   calibrate)
-    ros2 service call /rebel_gripper_left/calibrate std_srvs/srv/Trigger
-    ros2 service call /rebel_gripper_right/calibrate std_srvs/srv/Trigger
+    nodes="$(running_nodes rebel_gripper)"
+    [ -n "$nodes" ] || { echo "run.sh: no gripper node on ROS_DOMAIN_ID=$ROS_DOMAIN_ID - start the launch first (same domain)" >&2; exit 1; }
+    for n in ${nodes//,/ }; do ros2 service call "$n/calibrate" std_srvs/srv/Trigger; done
     ;;
   lag)
     exec python3 "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../tools/lag_probe.py" "$@"
