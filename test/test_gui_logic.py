@@ -47,12 +47,12 @@ def test_isaac_profile_has_no_real_robot_flags():
 
 def test_optional_arguments_only_when_changed():
     base = as_dict(build_teleop_cmd(BUILTIN_PROFILES["Isaac Sim"]))
-    assert not {"scale_rot", "roll_sign", "skip_home", "mocap_bridge"} & base.keys()
+    assert not {"scale_rot", "roll_sign", "skip_home", "mocap_bridge", "limit_margin_deg"} & base.keys()
     p = dict(BUILTIN_PROFILES["Isaac Sim"], scale_rot=0.5, roll_sign=-1, skip_home=True, mocap_bridge=False,
-             extra="limit_warn_mm:=10")
+             extra="limit_warn_mm:=10", limit_margin_deg=15)
     d = as_dict(build_teleop_cmd(p))
     assert d["scale_rot"] == "0.5" and d["roll_sign"] == "-1" and d["skip_home"] == "true"
-    assert d["mocap_bridge"] == "false" and d["limit_warn_mm"] == "10"
+    assert d["mocap_bridge"] == "false" and d["limit_warn_mm"] == "10" and d["limit_margin_deg"] == "15.0"
 
 
 def test_arms_and_node_suffixes():
@@ -67,6 +67,7 @@ def test_validate():
     assert validate(dict(BUILTIN_PROFILES["Real robot"], home_deg="0 0 60 0 120 0"))             # joint 5 over its limit
     assert validate(dict(BUILTIN_PROFILES["Real robot"], max_joint_speed_deg=60))                # above the ReBeL maximum
     assert validate(dict(BUILTIN_PROFILES["Real robot"], extra="a 'b"))                          # unbalanced quote
+    assert validate(dict(BUILTIN_PROFILES["Real robot"], limit_margin_deg=50))                   # margin too large
     assert validate(dict(BUILTIN_PROFILES["Real robot"], rig="left", right_hand=2, right_gripper=2)) == []   # unused side
 
 
