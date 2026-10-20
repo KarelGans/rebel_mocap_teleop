@@ -2,6 +2,7 @@
 import math
 
 import numpy as np
+import pytest
 
 from rebel_demo.kinematics import (HOME, HW_LOWER, LOWER, UPPER, clamp_roll, drop_unreachable, fk, ik, limits_hit,
                                    parse_pose_deg, quat_to_matrix, rot, scale_rotation, soft_limits, twist_about)
@@ -50,10 +51,8 @@ def test_quat_to_matrix():
 
 
 def test_gripper_threshold_hysteresis():
-    import importlib.util
-    if importlib.util.find_spec("rclpy") is None:
-        return
-    from src.rebel_demo.gripper_node import next_state
+    pytest.importorskip("rclpy")                        # the node modules need ROS 2: skipped (not passed) without it
+    from rebel_demo.gripper_node import next_state
     assert next_state(0.02, 1, 0.06, 0.01) == 0           # near -> close
     assert next_state(0.10, 0, 0.06, 0.01) == 1           # far -> open
     assert next_state(0.062, 0, 0.06, 0.01) == 0          # inside dead band -> keep
@@ -68,10 +67,8 @@ def _q(axis, deg):
 
 
 def test_gripper_orientation_angle():
-    import importlib.util
-    if importlib.util.find_spec("rclpy") is None:
-        return
-    from src.rebel_demo.gripper_node import next_state_angle, quat_mul, rotation_angle_deg
+    pytest.importorskip("rclpy")                        # the node modules need ROS 2: skipped (not passed) without it
+    from rebel_demo.gripper_node import next_state_angle, quat_mul, rotation_angle_deg
     assert abs(rotation_angle_deg((0, 0, 0, 1))) < 1e-9
     for axis in [(1, 0, 0), (0, 1, 0), (0, 0, 1), (1, 1, 0)]:
         assert abs(rotation_angle_deg(_q(axis, 180)) - 180) < 1e-6          # flipped about any axis
@@ -90,10 +87,8 @@ def test_gripper_orientation_angle():
 
 
 def test_gripper_angle_bands():
-    import importlib.util
-    if importlib.util.find_spec("rclpy") is None:
-        return
-    from src.rebel_demo.gripper_node import next_state_angle
+    pytest.importorskip("rclpy")                        # the node modules need ROS 2: skipped (not passed) without it
+    from rebel_demo.gripper_node import next_state_angle
     assert next_state_angle(10, 0, 30, 100) == 1           # same plane -> open
     assert next_state_angle(170, 1, 30, 100) == 0          # reversed -> closed
     assert next_state_angle(60, 1, 30, 100) == 1           # in between -> keep
@@ -102,10 +97,8 @@ def test_gripper_angle_bands():
 
 
 def test_keyboard_debounce():
-    import importlib.util
-    if importlib.util.find_spec("rclpy") is None:
-        return
-    from src.rebel_demo.keyboard_node import KeyDebounce
+    pytest.importorskip("rclpy")                        # the node modules need ROS 2: skipped (not passed) without it
+    from rebel_demo.keyboard_node import KeyDebounce
     d = KeyDebounce(0.3)
     assert d(10.0) is True
     assert d(10.1) is False                 # key repeat of a held SPACE

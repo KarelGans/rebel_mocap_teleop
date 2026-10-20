@@ -531,7 +531,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.f["robot_tf"].setToolTip("external: the robot PC publishes the arm TF on this ROS domain - do not start a second "
                                       "robot model (avoids TF_OLD_DATA)")
         self.f["joint_states_topic"] = line()
-        self.f["joint_states_topic"].setPlaceholderText("robot joint states topic (optional, for the start pose)")
+        self.f["joint_states_topic"].setPlaceholderText("robot joint states for the start pose (real robot: default /joint_states)")
         tf_row.addWidget(self.f["robot_tf"])
         tf_row.addWidget(self.f["joint_states_topic"], 1)
         form.addRow("Robot TF / joint states", tf_row)
@@ -553,7 +553,8 @@ class MainWindow(QtWidgets.QMainWindow):
         form.addRow("Filter cutoff (Hz)", self.f["cutoff_hz"])
         form.addRow("Max joint speed (deg/s)", self.f["max_joint_speed_deg"])
         self.f["limit_margin_deg"] = spin(0.0, 44.0, 1.0, 1)
-        self.f["limit_margin_deg"].setToolTip("Never publish a joint closer than this to its hardware limit (default 1)")
+        self.f["limit_margin_deg"].setToolTip("Never publish a joint closer than this to its limit (default 5; the real "
+                                              "robot's follower clamps 2.9 deg inside, so keep it above 3)")
         form.addRow("Joint limit margin (deg)", self.f["limit_margin_deg"])
         self.f["orientation"] = combo(["false", "semi", "true"])
         self.f["roll_sign"] = combo(["1", "-1"])

@@ -26,13 +26,14 @@ _BASE = {
     "scale_trans": 1.0, "scale_rot": 1.0, "cutoff_hz": 6.0, "max_joint_speed_deg": 45.0,
     "orientation": "semi", "roll_sign": 1, "gripper_mode": "orientation",
     "workspace_max": "0.7 0.7 1.4", "robot_ypr": "1.5708 0 0", "home_deg": "0 0 60 0 50 0",
-    "skip_home": False, "mocap_bridge": True, "extra": "", "limit_margin_deg": 1.0,
+    "skip_home": False, "mocap_bridge": True, "extra": "", "limit_margin_deg": 5.0,
     "robot_tf": "own", "joint_states_topic": "",
 }
 BUILTIN_PROFILES = {
-    "Real robot": dict(_BASE, mode="real"),
+    # real robot: the robot PC's mocap follower moves at 0.3 rad/s (17.2 deg/s), so we never command faster
+    "Real robot": dict(_BASE, mode="real", max_joint_speed_deg=17.0),
     "Isaac Sim": dict(_BASE, mode="isaac"),
-    "Real robot (robot PC TF)": dict(_BASE, mode="real", robot_tf="external"),     # = scripts/run.sh real-ext
+    "Real robot (robot PC TF)": dict(_BASE, mode="real", robot_tf="external", max_joint_speed_deg=17.0),  # = run.sh real-ext
 }
 DEFAULT_PROFILE = "Real robot"
 
@@ -74,13 +75,16 @@ def build_teleop_cmd(profile):
         cmd.append(f"roll_sign:={int(p['roll_sign'])}")
     if p["skip_home"]:
         cmd.append("skip_home:=true")
-    if float(p["limit_margin_deg"]) != 1.0:
+    if float(p["limit_margin_deg"]) != 5.0:
         cmd.append(f"limit_margin_deg:={_num(p['limit_margin_deg'])}")
     if p["mode"] == "real":            # no Isaac: PC time
         cmd.append("use_sim_time:=false")
         # the joint-state stream (rig TF) is made from the commands, unless the robot PC publishes the arm TF itself
         cmd.append("robot_tf:=external" if p["robot_tf"] == "external" else "fake_state:=true")
-    if p["joint_states_topic"].strip():
+        # start from the robot's measured joints (never assume zeros); never our rig topic, never published by us
+        cmd += [f"robot_joint_states_topic:={p['joint_states_topic'].strip() or '/joint_states'}",
+                "require_joint_states:=true"]
+    elif p["joint_states_topic"].strip():
         cmd.append(f"joint_states_topic:={p['joint_states_topic'].strip()}")
     if not p["mocap_bridge"]:
         cmd.append("mocap_bridge:=false")
@@ -142,6 +146,9 @@ def validate(profile):
             errs.append(f"{key} must be above 0")
     if not 0.0 <= float(p["limit_margin_deg"]) < 45.0:
         errs.append("limit_margin_deg must be 0..45")
+    elif p["mode"] == "real" and float(p["limit_margin_deg"]) < 3.0:
+        errs.append("limit_margin_deg below 3 deg: the robot's mocap follower clamps 2.9 deg inside the limits, "
+                    "so near a limit the arm would not follow what we send")
     if float(p["max_joint_speed_deg"]) > 45.0:
         errs.append("max_joint_speed_deg above 45 is faster than the real ReBeL maximum")
     try:
