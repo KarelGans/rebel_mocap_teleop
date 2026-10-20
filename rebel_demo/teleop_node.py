@@ -53,6 +53,9 @@ assumed to be straight up) and drives to HOME in joint space at max_joint_speed_
   joint_prefix [arm_left_]  joint names = prefix + joint1..joint6 (arm_left_ / arm_right_ on the dual-arm rig)
   joint_names ['']        6 comma-separated names (base to wrist), overrides joint_prefix, e.g. "a_1,a_2,...,a_6"
   joint_states_topic [/dual_arm/isaac_joint_states]   where Isaac publishes the measured joints (feedback only)
+  max_lead_deg [0]        the command is never more than this far ahead of the measured joints on joint_states_topic, so a
+                          slower follower / real arm never falls far behind (HOME and teleop wait for it); 0 = off
+  feedback_timeout [0.5]  s; measured joints older than this are ignored (the lead limit is then inactive, with a warning)
 """
 import math
 
@@ -67,8 +70,8 @@ from std_msgs.msg import Bool
 from std_srvs.srv import SetBool, Trigger
 from tf2_ros import Buffer, TransformException, TransformListener
 
-from .kinematics import (JOINT_NAMES, LOWER, UPPER, fk, ik, limits_hit, parse_pose_deg, quat_to_matrix, scale_rotation,
-                         twist_about)
+from .kinematics import (JOINT_NAMES, LOWER, UPPER, fk, ik, limit_lead, limits_hit, parse_pose_deg, quat_to_matrix,
+                         scale_rotation, twist_about)
 
 
 def matrix_to_quat(R):
@@ -149,6 +152,8 @@ class Teleop(Node):
         self.target = None                                                # last IK target position (rate limit)
         self.home_wait = float(d("home_wait", 1.0).value)
         self.skip_home = bool(d("skip_home", False).value)
+        self.max_lead = math.radians(float(d("max_lead_deg", 0.0).value))   # 0 = off
+        self.fb_timeout = float(d("feedback_timeout", 0.5).value)
         self.home = parse_pose_deg(d("home_deg", "0 0 60 0 50 0").value)    # HOME [rad]; raises on bad input
         self.engaged = bool(d("start_engaged", False).value)
         topic = d("command_topic", "/dual_arm/isaac_joint_commands").value
@@ -177,6 +182,7 @@ class Teleop(Node):
 
         self.q_cmd = None                  # last commanded joints (set from the measured joints at start)
         self.q_meas = None
+        self.t_meas = None                 # receive time [s] of q_meas
         self.t_start = None
         self.homing = True                 # drive to HOME before teleop can engage
         self.lost_since = None
@@ -199,6 +205,7 @@ class Teleop(Node):
     def on_js(self, msg):
         if all(n in msg.name for n in self.joint_names):
             self.q_meas = np.array([msg.position[msg.name.index(n)] for n in self.joint_names])
+            self.t_meas = self.get_clock().now().nanoseconds * 1e-9
 
     def set_engaged(self, on):
         """Clutch in / out. Either way the reference is retaken on the next cycle: robot_ref = fk(q_cmd) (the last
@@ -252,7 +259,8 @@ class Teleop(Node):
         d = self.home - self.q_cmd
         n = np.max(np.abs(d)) / (self.vmax * self.dt)              # cycles the slowest joint needs
         self.q_cmd = self.home.copy() if n <= 1 else self.q_cmd + d / n
-        if n <= 1:
+        self.q_cmd = self.hold_lead(self.q_cmd)                    # slow robot: HOME waits for it
+        if np.array_equal(self.q_cmd, self.home):                  # arrived (only if the lead clamp left it at HOME)
             self.homing = False
             self.get_logger().info("at HOME - call ~/engage true to start")
         self.publish(self.q_cmd)
@@ -393,7 +401,27 @@ class Teleop(Node):
         if m > max_step:
             dq *= max_step / m
         self.q_cmd = np.clip(self.q_cmd + dq, LOWER, UPPER)
+        self.q_cmd = self.hold_lead(self.q_cmd)            # robot behind: never more than max_lead ahead of it
         self.publish(self.q_cmd)                           # 7.
+
+    def hold_lead(self, q):
+        """q limited to max_lead_deg ahead of the fresh measured joints (see limit_lead); q itself if off / no feedback."""
+        if self.max_lead <= 0:
+            return q
+        age = self.get_clock().now().nanoseconds * 1e-9 - self.t_meas if self.t_meas is not None else None
+        if self.q_meas is None or age > self.fb_timeout:
+            self.get_logger().warn(
+                "max_lead_deg is set but no fresh joint states - lead limit inactive"
+                + ("" if age is None else f" (last {age:.1f} s ago)"), throttle_duration_sec=5.0)
+            return q
+        out = limit_lead(q, self.q_meas, self.max_lead)
+        if not np.array_equal(out, q):
+            lag = np.abs(q - self.q_meas)
+            i = int(np.argmax(lag))
+            self.get_logger().warn(
+                f"robot is behind: command held within {math.degrees(self.max_lead):.0f} deg of the measured joints "
+                f"(joint {i + 1} lags {math.degrees(lag[i]):.0f} deg)", throttle_duration_sec=2.0)
+        return out
 
     def publish(self, q):
         msg = JointState()

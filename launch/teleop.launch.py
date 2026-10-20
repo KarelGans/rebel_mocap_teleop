@@ -59,6 +59,7 @@ def setup(context):
     # Isaac (dual_arm_rig_ros2_bridge.py) listens on the command topic and publishes the whole rig's joint states.
     command_topic = a("command_topic") or "/dual_arm/isaac_joint_commands"
     js_topic = "/dual_arm/isaac_joint_states"
+    feedback_topic = a("feedback_topic") or js_topic     # measured joints for teleop (start pose, lead limit)
     sides = ["left", "right"] if rig == "both" else [rig]
     arms = []
     for side in sides:
@@ -95,7 +96,7 @@ def setup(context):
                               "base_frame": arm["base_frame"],
                               "joint_prefix": arm["prefix"],
                               "joint_names": a("joint_names"),
-                              "joint_states_topic": js_topic,
+                              "joint_states_topic": feedback_topic,
                               "hand_frame": arm["hand"],
                               "scale_trans": float(a("scale_trans") or a("scale") or "1.0"),
                               "scale_rot": float(a("scale_rot")),
@@ -104,6 +105,7 @@ def setup(context):
                               "roll_sign": float(a("roll_sign")),
                               "cutoff_hz": float(a("cutoff_hz")),
                               "max_joint_speed_deg": float(a("max_joint_speed_deg")),
+                              "max_lead_deg": float(a("max_lead_deg")),
                               "skip_home": a("skip_home").lower() == "true",
                               "home_deg": a("home_deg"),
                               "limit_warn_mm": float(a("limit_warn_mm")),
@@ -168,7 +170,14 @@ def generate_launch_description():
                       "follows the hand's roll about the tool axis"),
         D("roll_sign", default_value="1.0", description="orientation:=semi: -1 flips the joint 6 direction"),
         D("cutoff_hz", default_value="4.0", description="low-pass cutoff on the hand pose"),
-        D("max_joint_speed_deg", default_value="45.0"),
+        D("max_joint_speed_deg", default_value="45.0",
+          description="per-joint speed limit of the command [deg/s]; real robot: below the follower's speed, e.g. 15"),
+        D("max_lead_deg", default_value="0",
+          description="command never more than this ahead of the measured joints [deg], 0 = off; real robot: below "
+                      "the follower's catch-up threshold, e.g. 20"),
+        D("feedback_topic", default_value="",
+          description="measured joints for the start pose and the lead limit; '' = /dual_arm/isaac_joint_states; "
+                      "real robot: /joint_states"),
         D("fake_state", default_value="false",
           description="target:=isaac only: publish the rig joint states from the commands (when no Isaac / robot does)"),
         D("home_deg", default_value="0 0 60 0 50 0",

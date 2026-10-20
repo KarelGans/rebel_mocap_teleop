@@ -3,8 +3,8 @@ import math
 
 import numpy as np
 
-from src.rebel_demo.kinematics import (HOME, LOWER, UPPER, fk, ik, parse_pose_deg, quat_to_matrix, rot, scale_rotation,
-                                       twist_about)
+from src.rebel_demo.kinematics import (HOME, LOWER, UPPER, fk, ik, limit_lead, parse_pose_deg, quat_to_matrix, rot,
+                                       scale_rotation, twist_about)
 
 # the bent-elbow "ready" pose (the former HOME; HOME is now all zeros = arm straight up)
 READY = np.radians([0.0, 13.4, 87.9, 0.0, 78.7, 0.0])
@@ -193,3 +193,38 @@ def test_scale_rotation():
     R = rot(axis, math.radians(40))
     out = scale_rotation(R, 0.25)
     assert math.isclose(twist_about(out, axis), math.radians(10), abs_tol=1e-9)  # same axis, a quarter of the angle
+
+
+def test_limit_lead_off():
+    q = np.radians([10.0, -80.0, 100.0, 5.0, 0.0, 170.0])
+    meas = np.zeros(6)
+    for out in (limit_lead(q, meas, 0.0), limit_lead(q, meas, -1.0), limit_lead(q, None, 0.3)):
+        assert np.array_equal(out, q)
+    assert limit_lead(q, None, 0.3) is not q                                    # a copy
+
+
+def test_limit_lead_clamps_per_joint():
+    meas = np.radians([0.0, 10.0, 50.0, -30.0, 0.0, 90.0])
+    lead = math.radians(20)
+    q = meas + np.radians([5.0, 40.0, -25.0, -19.0, 21.0, 0.0])               # in range, over, under, in, over, in
+    out = limit_lead(q, meas, lead)
+    assert np.allclose(out - meas, np.radians([5.0, 20.0, -20.0, -19.0, 20.0, 0.0]))
+    assert np.array_equal(out[[0, 3, 5]], q[[0, 3, 5]])                       # joints within range are untouched
+    assert np.all(np.abs(out - meas) <= lead + 1e-12)
+
+
+def _follow(max_lead_deg, seconds=5.0, rate=60.0):
+    """A joint commanded up at 45 deg/s, a follower arm chasing it at 0.3 rad/s; returns the largest |cmd - arm| [rad]."""
+    dt, vmax, follower_v = 1.0 / rate, math.radians(45), 0.3
+    cmd, arm, worst = np.zeros(6), np.zeros(6), 0.0
+    for _ in range(int(seconds * rate)):
+        cmd = cmd + vmax * dt * np.array([0, 0, 0, 0, 0, 1.0])
+        cmd = limit_lead(cmd, arm, math.radians(max_lead_deg))                # what Teleop.hold_lead does when fresh
+        arm = arm + np.clip(cmd - arm, -follower_v * dt, follower_v * dt)
+        worst = max(worst, float(np.max(np.abs(cmd - arm))))
+    return worst
+
+
+def test_lead_limit_keeps_slow_follower_close():
+    assert _follow(0.0) > 1.75                                                # without it the follower would latch
+    assert _follow(20.0) <= math.radians(20) + 1e-9

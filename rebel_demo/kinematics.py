@@ -173,6 +173,16 @@ def limits_hit(q, lower=None, upper=None, margin_deg=1.0):
     return out
 
 
+def limit_lead(q_cmd, q_meas, max_lead):
+    """q_cmd clipped to q_meas +- max_lead per joint [rad]: the command never runs further ahead of the measured joints.
+    max_lead <= 0 or no measurement -> q_cmd unchanged (a copy)."""
+    q_cmd = np.asarray(q_cmd, float)
+    if q_meas is None or max_lead <= 0:
+        return q_cmd.copy()
+    q_meas = np.asarray(q_meas, float)
+    return np.clip(q_cmd, q_meas - max_lead, q_meas + max_lead)
+
+
 def fk_jac(q):
     """Flange pose (4x4, base_link) and its geometric Jacobian (6x6: rows 0-2 linear, 3-5 angular) in one pass."""
     R, p = np.eye(3), np.zeros(3)

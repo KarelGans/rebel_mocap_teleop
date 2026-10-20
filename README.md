@@ -142,13 +142,18 @@ flags are needed: `use_sim_time:=false` and `fake_state:=true` (see [Start pose 
 ```bash
 ros2 launch rebel_demo teleop.launch.py target:=isaac rig:=both rviz:=false scale_trans:=1.0 cutoff_hz:=6.0 \
   left_hand_frame:=2 left_gripper_frame:=4 right_hand_frame:=1 right_gripper_frame:=3 gripper_mode:=orientation \
-  orientation:=semi max_joint_speed_deg:=45 workspace_max:="0.7 0.7 1.4" \
+  orientation:=semi max_joint_speed_deg:=15 workspace_max:="0.7 0.7 1.4" \
   robot_ypr:="1.5708 0 0" home_deg:="0 0 60 0 50 0" \
-  use_sim_time:=false fake_state:=true
+  use_sim_time:=false fake_state:=true feedback_topic:=/joint_states max_lead_deg:=20
 ```
 - `target:=isaac` only selects the output mode (commands go out on a topic); it does not mean Isaac Sim is running.
-- `home_deg` is the start pose of both arms. The robot must really be at all zeros (straight up) when you start: without
-  joint feedback teleop assumes zeros and ramps from there. If it already is at the pose you want, drop `home_deg` and add `skip_home:=true`.
+- Why the last three arguments: the follower moves the arm at 0.3 rad/s (~17 deg/s), goes into catch-up when command and
+  measured joint differ by more than 0.5 rad and **latches** (robot stops, needs a reset) above 1.75 rad. So teleop speed is
+  limited to 15 deg/s and `max_lead_deg:=20` keeps every joint of the command within 20 deg of the real arm (read from
+  `feedback_topic`). Without them the command runs away from a slower arm (hand twist in `semi`, fast hand moves).
+- `home_deg` is the start pose of both arms. With `feedback_topic:=/joint_states` teleop starts from the real arm's measured pose
+  and homing waits for the robot. Without `feedback_topic` (no joint feedback) it assumes all zeros (straight up): the robot
+  must really be there. If the arm already is at the pose you want, drop `home_deg` and add `skip_home:=true`.
 - `robot_ypr` turns the robot frame to match how you stand ([2.5](#25-align-the-robot-with-how-you-stand)).
 - Keep the whole command on one logical line (`\` at the line ends) and quote values that contain spaces.
 - Single arm: `rig:=left` (uses `left_hand_frame` / `left_gripper_frame`) or `rig:=right` (uses `right_*`); drop the other side's arguments.
@@ -233,7 +238,9 @@ to move it ([section 12](#12-testing-without-hardware)). Over SSH add `rviz:=fal
 | orientation | false | `false` position only; `true` follow the full hand rotation; `semi` position only plus joint 6 follows your hand's roll ([section 5](#5-orientation-modes)) |
 | roll_sign | 1.0 | `orientation:=semi`: `-1` flips the joint-6 direction |
 | cutoff_hz | 4.0 | low-pass cutoff on the hand pose; lower = smoother but more lag |
-| max_joint_speed_deg | 45 | per-joint speed limit (the real ReBeL maximum) |
+| max_joint_speed_deg | 45 | per-joint speed limit (the real ReBeL maximum). Real robot with the mocap follower: 15 (it follows at ~17 deg/s) |
+| feedback_topic | (`/dual_arm/isaac_joint_states`) | measured joints for the start pose and the lead limit. Real robot: `/joint_states`. The rig TF (`robot_state_publisher`, `fake_state`) always uses `/dual_arm/isaac_joint_states` |
+| max_lead_deg | 0 (off) | the command is never more than this many degrees ahead of the measured joints (per joint), and homing waits for the robot. Real robot: below the follower's catch-up threshold (0.5 rad = 29 deg), e.g. 20 |
 | workspace_min, workspace_max | `-0.7 -0.7 -0.45`, `0.7 0.7 0.95` | clamp of the tool target in the arm base frame (m), widened to include the pose at engage |
 | limit_warn_mm | 5 | warn `joint limit reached` when the IK is this far (mm) off the target with a joint at a limit |
 | home_deg | `0 0 60 0 50 0` | start pose of every arm, 6 angles in degrees (e.g. `"0 0 60 0 50 0"`); checked against the joint limits at start |
@@ -247,7 +254,8 @@ to move it ([section 12](#12-testing-without-hardware)). Over SSH add `rviz:=fal
 
 Node-only parameters (set with `--ros-args -p`): teleop `rate_hz` 60, `stale_timeout` 0.2 s (no new pose -> hold),
 `reanchor_after` 2 s, `max_hand_speed` 2 m/s, `max_tool_speed` 0.5 m/s, `home_wait` 1 s, `start_engaged` false,
-`feedback_from_joint_states` false (seed the IK from measured joints instead of the last command); gripper `debounce` 0.1 s,
+`feedback_from_joint_states` false (seed the IK from measured joints instead of the last command), `feedback_timeout` 0.5 s
+(feedback older than this counts as lost); gripper `debounce` 0.1 s,
 `max_speed` 0.05 m/s, `start_open` true, `closed_pos` / `open_pos`; keyboard `teleop`, `debounce` 0.3 s. Full list in each node's docstring.
 
 ## 4. How teleop works (every cycle, 60 Hz)
@@ -287,7 +295,10 @@ Teleop needs two things from outside: the arm's start pose and (for the rig TF) 
   PC time. It exists to connect the TF tree (the rig has movable lift and slider joints that `robot_state_publisher` needs
   values for). The values are your commands, not measurements. Use `use_sim_time:=false` with it, and never together with Isaac
   (two publishers on different clocks give `TF_OLD_DATA`).
-- **No joint feedback at all:** the arm is assumed to be at all zeros and ramps to `home_deg` from there.
+- **`feedback_topic:=/joint_states`:** real measurements. Teleop reads the arm's joints there (`arm_left_joint1..6`,
+  `arm_right_joint1..6`): the start pose is the real pose, and with `max_lead_deg` the command stays within that many degrees
+  of it. `fake_state` still provides the TF tree; `feedback_topic` provides the measurements.
+- **No joint feedback at all** (no `feedback_topic`, fake state only): the arm is assumed to be at all zeros and ramps to `home_deg` from there.
 - **`skip_home:=true`:** no start move at all; use it when the robot already is where you want it.
 
 ## 7. Gripper (HIWIN XEG-32)
@@ -442,6 +453,7 @@ limit to the closest pose and follows again as soon as the hand returns); the la
 | teleop log `hand pose stale`, `frozen`, `holding` | mocap data late or lost: markers occluded or too few, Motive streaming rate, network. `stale_timeout` only tolerates short gaps |
 | **Engage / start** | |
 | engage refused: `moving to HOME - engage again when 'at HOME' is logged` | the start move has not finished. If `start pose ...` never appears, the control loop is not ticking (`use_sim_time` true without `/clock`, or Isaac not playing); if it appears but `at HOME` does not, check the joint states (NaN, wrong names) |
+| follower log `LATCH error ... rad on arm_..._jointN > 1.75` or `engaged in catch-up (error ... rad)` | the command ran too far ahead of the real arm (follower: ~17 deg/s, catch-up above 0.5 rad, latch above 1.75 rad). Lower `max_joint_speed_deg` (15) and set `feedback_topic:=/joint_states max_lead_deg:=20` (both are in `run.sh real`); without `feedback_topic` teleop assumes the arm starts at all zeros. A HOLD latch clears by itself once the error stays below 1 rad for 1 s; otherwise release and re-enable the follower's deadman |
 | commands stay 0 although engaged, log `holding: no TF arm_left_base_link <- rigid_body_N` | nobody publishes `/dual_arm/isaac_joint_states`, so the rig TF is split. Add `fake_state:=true`, or publish the real states there |
 | `engage service not available` (keyboard) | the teleop node is not running, died at start (look for `ValueError`, e.g. a wrong `home_deg`), or the terminal is on another domain / RMW |
 | **Clock / domain** | |
@@ -465,7 +477,7 @@ limit to the closest pose and follows again as soon as the hand returns); the la
 - No collision checking; no soft margin before the joint limits (joints 4 and 6 can still be driven to +-179 deg with `orientation:=true`).
 - IK targets `tool0`, not the point between the XEG jaws; with `orientation:=true` the fingertips swing.
 - The wrist side (joint 5 sign) is not constrained; only the elbow is (joint 3 >= 15 deg).
-- `fake_state` mirrors the commands, it does not measure the arm. The XEG open / closed carriage values are the model joint limits (16.5 mm travel per jaw): check against the datasheet.
+- `fake_state` mirrors the commands, it does not measure the arm (use `feedback_topic` for real measurements). The XEG open / closed carriage values are the model joint limits (16.5 mm travel per jaw): check against the datasheet.
 
 ## Licence and credits
 - Robot model: `igus_rebel_description` from the igus mesh LOD bundle, not included (dual-arm rig, rebel2 arm, XEG-32, decimated meshes).
