@@ -526,6 +526,15 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.f["mode"] = combo(["real", "isaac"])
         form.addRow("Robot side", self.f["mode"])
+        tf_row = QtWidgets.QHBoxLayout()
+        self.f["robot_tf"] = combo(["own", "external"])
+        self.f["robot_tf"].setToolTip("external: the robot PC publishes the arm TF on this ROS domain - do not start a second "
+                                      "robot model (avoids TF_OLD_DATA)")
+        self.f["joint_states_topic"] = line()
+        self.f["joint_states_topic"].setPlaceholderText("robot joint states topic (optional, for the start pose)")
+        tf_row.addWidget(self.f["robot_tf"])
+        tf_row.addWidget(self.f["joint_states_topic"], 1)
+        form.addRow("Robot TF / joint states", tf_row)
         self.f["rig"] = combo(["both", "left", "right"])
         form.addRow("Arms (rig)", self.f["rig"])
         ids = QtWidgets.QHBoxLayout()

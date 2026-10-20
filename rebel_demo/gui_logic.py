@@ -27,11 +27,12 @@ _BASE = {
     "orientation": "semi", "roll_sign": 1, "gripper_mode": "orientation",
     "workspace_max": "0.7 0.7 1.4", "robot_ypr": "1.5708 0 0", "home_deg": "0 0 60 0 50 0",
     "skip_home": False, "mocap_bridge": True, "extra": "", "limit_margin_deg": 10.0,
-    "limit_recovery": True, "limit_backoff_deg": 3.0,
+    "limit_recovery": True, "limit_backoff_deg": 3.0, "robot_tf": "own", "joint_states_topic": "",
 }
 BUILTIN_PROFILES = {
     "Real robot": dict(_BASE, mode="real"),
     "Isaac Sim": dict(_BASE, mode="isaac"),
+    "Real robot (robot PC TF)": dict(_BASE, mode="real", robot_tf="external"),     # = scripts/run.sh real-ext
 }
 DEFAULT_PROFILE = "Real robot"
 
@@ -79,8 +80,12 @@ def build_teleop_cmd(profile):
         cmd.append("limit_recovery:=false")
     if float(p["limit_backoff_deg"]) != 3.0:
         cmd.append(f"limit_backoff_deg:={_num(p['limit_backoff_deg'])}")
-    if p["mode"] == "real":            # no Isaac: PC time, and the joint-state stream is made from the commands
-        cmd += ["use_sim_time:=false", "fake_state:=true"]
+    if p["mode"] == "real":            # no Isaac: PC time
+        cmd.append("use_sim_time:=false")
+        # the joint-state stream (rig TF) is made from the commands, unless the robot PC publishes the arm TF itself
+        cmd.append("robot_tf:=external" if p["robot_tf"] == "external" else "fake_state:=true")
+    if p["joint_states_topic"].strip():
+        cmd.append(f"joint_states_topic:={p['joint_states_topic'].strip()}")
     if not p["mocap_bridge"]:
         cmd.append("mocap_bridge:=false")
     cmd += shlex.split(p["extra"] or "")
@@ -117,6 +122,10 @@ def validate(profile):
         errs.append("rig must be both, left or right")
     if p["mode"] not in ("real", "isaac"):
         errs.append("mode must be real or isaac")
+    if p["robot_tf"] not in ("own", "external"):
+        errs.append("robot TF must be own or external")
+    elif p["robot_tf"] == "external" and p["mode"] != "real":
+        errs.append("robot TF 'external' is for the real robot (Isaac's bridge needs our robot model)")
     ids = [int(p[k]) for k in ("left_hand", "left_gripper", "right_hand", "right_gripper")]
     used = ids if p["rig"] == "both" else ids[:2] if p["rig"] == "left" else ids[2:]
     if any(i < 1 for i in used):

@@ -155,6 +155,10 @@ ros2 launch rebel_demo teleop.launch.py target:=isaac rig:=both rviz:=false scal
 - `robot_ypr` turns the robot frame to match how you stand ([2.5](#25-align-the-robot-with-how-you-stand)).
 - Keep the whole command on one logical line (`\` at the line ends) and quote values that contain spaces.
 - Single arm: `rig:=left` (uses `left_hand_frame` / `left_gripper_frame`) or `rig:=right` (uses `right_*`); drop the other side's arguments.
+- **The robot PC publishes the arm TF on the same ROS domain** (its own `robot_state_publisher`, MoveIt, RViz): then replace
+  `fake_state:=true` by `robot_tf:=external` (this is `run.sh real-ext`). Teleop then does not start a second robot model, which
+  would fight the robot's frames (same frame names, other timestamps: `TF_OLD_DATA` flood, lag, stale holds). If the robot
+  publishes its joint states, add `joint_states_topic:=<that topic>` so teleop starts from the real pose instead of assuming zeros.
 
 ### 2.3 Isaac Sim
 In Isaac's Script Editor (stage loaded, timeline **stopped**) run the rig's three scripts, then press **Play**. Isaac must be
@@ -242,6 +246,8 @@ One window instead of the driver, teleop, keyboard and calibrate terminals (need
 | target | rviz | `rviz`: no Isaac, `joint_merger` publishes the rig's joint states (RViz shows the arm). `isaac`: publish the commands on `command_topic` and expect the joint states from outside (Isaac, your driver, or `fake_state`); also the setting for a real robot |
 | rig | both | `both`: both arms, two hands. `left` / `right`: only that arm of the dual-arm rig, the other holds its pose; it uses that side's `left_*` / `right_*` frame arguments |
 | use_sim_time | (auto) | `true` with `target:=isaac` (Isaac's `/clock`), else `false`. Real robot: `false` |
+| robot_tf | own | `own`: start our `robot_state_publisher` (rig model). `external`: the robot PC already publishes `world -> arm_*_base_link` on this domain; do not start a second model (needs `target:=isaac`, refused together with `fake_state:=true`) |
+| joint_states_topic | `/dual_arm/isaac_joint_states` | measured joints: the start pose of teleop (and the input of our `robot_state_publisher`) |
 | fake_state | false | `target:=isaac` only: publish `/dual_arm/isaac_joint_states` from the commanded joints (others 0). For a robot or setup with no state publisher; never together with Isaac |
 | command_topic | `/dual_arm/isaac_joint_commands` | output topic; must match Isaac's ROS2 Subscribe Joint State node |
 | joint_names | (auto) | `rig:=left/right` only: 6 comma-separated joint names (base to wrist) if the receiver uses other names; default `arm_<side>_joint1..6` |
@@ -483,6 +489,7 @@ limit to the closest pose and follows again as soon as the hand returns); the la
 | `engage service not available` (keyboard) | the teleop node is not running, died at start (look for `ValueError`, e.g. a wrong `home_deg`), or the terminal is on another domain / RMW |
 | **Clock / domain** | |
 | `TF_OLD_DATA ignoring data from the past ... at time 4.4` (all frames, all nodes) | two clocks or two publishers: Isaac's sim time mixed with PC time. With Isaac do not pass `use_sim_time:=false` / `fake_state:=true`; restart the launch after stopping or resetting Isaac; `ros2 topic info /dual_arm/isaac_joint_states -v` must show one publisher |
+| `TF_OLD_DATA ... at time 1792...` (PC time) for `arm_*_link1..6`, lag, keyboard slow to connect | another robot model publishes the same frames on this ROS domain (`ros2 run tf2_ros tf2_echo` / `ros2 topic list` show e.g. `knife_c` frames, MoveIt topics): it is the robot PC's own stack. Use `robot_tf:=external` instead of `fake_state:=true` (`run.sh real-ext`), or a domain nobody else uses |
 | teleop and Isaac do not see each other | different `ROS_DOMAIN_ID` (Isaac with none = 0): export the same number in every terminal and in the shell that starts Isaac Sim |
 | `ros2 service call` hangs on `waiting for service`, or `sequence size exceeds remaining buffer` | this terminal is on a different ROS setup than teleop (distro, `RMW_IMPLEMENTATION` or `ROS_DOMAIN_ID`). Compare: `tr '\0' '\n' < /proc/$(pgrep -n -f rebel_demo/teleop)/environ \| grep -E '^(ROS_\|RMW_)'`, set the same values, then `ros2 daemon stop` |
 | RViz loads someone else's robot | another project uses the same `ROS_DOMAIN_ID`: pick another number everywhere |

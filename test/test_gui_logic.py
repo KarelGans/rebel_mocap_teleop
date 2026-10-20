@@ -39,6 +39,16 @@ def test_real_profile_is_the_run_sh_real_command():
     assert same_values(as_dict(build_teleop_cmd(BUILTIN_PROFILES["Real robot"])), RUN_SH_REAL)
 
 
+def test_robot_pc_profile_is_run_sh_real_ext():
+    d = as_dict(build_teleop_cmd(BUILTIN_PROFILES["Real robot (robot PC TF)"]))
+    expected = {k: v for k, v in RUN_SH_REAL.items() if k != "fake_state"}
+    expected["robot_tf"] = "external"
+    assert same_values(d, expected)
+    assert validate(dict(BUILTIN_PROFILES["Isaac Sim"], robot_tf="external"))              # not with Isaac
+    d = as_dict(build_teleop_cmd(dict(BUILTIN_PROFILES["Real robot (robot PC TF)"], joint_states_topic="/joint_states")))
+    assert d["joint_states_topic"] == "/joint_states"
+
+
 def test_isaac_profile_has_no_real_robot_flags():
     d = as_dict(build_teleop_cmd(BUILTIN_PROFILES["Isaac Sim"]))
     assert "use_sim_time" not in d and "fake_state" not in d
@@ -81,14 +91,15 @@ def test_ypr_conversion_roundtrip():
 def test_profile_store_roundtrip(tmp_path):
     path = tmp_path / "profiles.json"
     store = ProfileStore(path)
-    assert store.names() == ["Real robot", "Isaac Sim"] and store.is_builtin("Real robot")
+    builtins = ["Real robot", "Isaac Sim", "Real robot (robot PC TF)"]
+    assert store.names() == builtins and store.is_builtin("Real robot")
     store.save("Lab", dict(BUILTIN_PROFILES["Real robot"], scale_trans=0.5))
     again = ProfileStore(path)
     assert "Lab" in again.names() and again.get("Lab")["scale_trans"] == 0.5 and again.last == "Lab"
     again.delete("Lab")
-    assert ProfileStore(path).names() == ["Real robot", "Isaac Sim"]
+    assert ProfileStore(path).names() == builtins
     path.write_text("not json")                                                                  # a broken file never crashes
-    assert ProfileStore(path).names() == ["Real robot", "Isaac Sim"]
+    assert ProfileStore(path).names() == builtins
     assert normalize({"scale_trans": 2})["rig"] == "both"
 
 

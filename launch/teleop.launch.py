@@ -47,6 +47,15 @@ def setup(context):
     if removed:      # silently ignoring them would use the default IDs of the wrong hand
         raise RuntimeError(f"{', '.join(removed)} no longer exist: use left_hand_frame / left_gripper_frame (rig:=left or both) "
                            f"and right_hand_frame / right_gripper_frame (rig:=right or both), e.g. left_hand_frame:=1")
+    robot_tf = a("robot_tf")
+    if robot_tf not in ("own", "external"):
+        raise RuntimeError(f"robot_tf:={robot_tf} - use own or external")
+    external = robot_tf == "external"
+    if external and a("target") != "isaac":
+        raise RuntimeError("robot_tf:=external needs target:=isaac (the robot's own stack provides the arm TF)")
+    if external and a("fake_state").lower() == "true":
+        raise RuntimeError("robot_tf:=external and fake_state:=true do not go together: the robot PC already publishes the "
+                           "arm TF; a second model would fight it (TF_OLD_DATA). Drop fake_state:=true.")
     if rig == "both" and a("joint_names"):
         raise RuntimeError("joint_names is for one arm only; rig:=both uses arm_left_/arm_right_ joint1..6")
     if a("orientation").lower() not in ("false", "true", "semi"):
@@ -58,7 +67,7 @@ def setup(context):
                   "lock_gripper_joints": a("lock_gripper")}).toxml()
     # Isaac (dual_arm_rig_ros2_bridge.py) listens on the command topic and publishes the whole rig's joint states.
     command_topic = a("command_topic") or "/dual_arm/isaac_joint_commands"
-    js_topic = "/dual_arm/isaac_joint_states"
+    js_topic = a("joint_states_topic") or "/dual_arm/isaac_joint_states"
     sides = ["left", "right"] if rig == "both" else [rig]
     arms = []
     for side in sides:
@@ -80,10 +89,11 @@ def setup(context):
         Node(package="tf2_ros", executable="static_transform_publisher", name="map_to_world",
              arguments=["--x", x, "--y", y, "--z", z, "--yaw", yaw, "--pitch", pitch, "--roll", roll,
                         "--frame-id", a("mocap_frame"), "--child-frame-id", "world"]),
-        Node(package="robot_state_publisher", executable="robot_state_publisher",
-             parameters=[{"robot_description": urdf}], output="screen",
-             remappings=[("joint_states", js_topic)]),
     ]
+    if not external:        # robot_tf:=external: the robot PC's robot_state_publisher provides world -> arm frames
+        nodes.append(Node(package="robot_state_publisher", executable="robot_state_publisher",
+                          parameters=[{"robot_description": urdf}], output="screen",
+                          remappings=[("joint_states", js_topic)]))
     # Every arm / gripper publishes on its own topic and joint_merger sends ONE combined message per cycle (Isaac's
     # Subscribe Joint State keeps only the latest message, so separate messages would take turns).
     merge_inputs = []
@@ -172,6 +182,11 @@ def generate_launch_description():
         D("roll_sign", default_value="1.0", description="orientation:=semi: -1 flips the joint 6 direction"),
         D("cutoff_hz", default_value="4.0", description="low-pass cutoff on the hand pose"),
         D("max_joint_speed_deg", default_value="45.0"),
+        D("robot_tf", default_value="own",
+          description="own = start our robot_state_publisher (rig model) | external = the robot PC publishes the arm TF "
+                      "(world -> arm_*_base_link) on this ROS domain: do not start a second model"),
+        D("joint_states_topic", default_value="",
+          description="measured joints for the start pose (and our robot_state_publisher); '' = /dual_arm/isaac_joint_states"),
         D("fake_state", default_value="false",
           description="target:=isaac only: publish the rig joint states from the commands (when no Isaac / robot does)"),
         D("home_deg", default_value="0 0 0 0 0 0",
