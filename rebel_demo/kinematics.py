@@ -22,20 +22,23 @@ JOINT_COLORS = [(0.90, 0.10, 0.10), (1.00, 0.55, 0.00), (0.95, 0.85, 0.10),
 #     ((0, 0, 0.1208), (0, 0, 0), (0, 0, 1), -math.pi * 179 / 180, math.pi * 179 / 180),
 # ]
 
-# for isaac: igus_rebel2_arm_macro.xacro (fixed motor joints merged), spec-sheet limits
+# geometry: igus_rebel2_arm_macro.xacro (fixed motor joints merged).
+# Limits: the real ReBeL, as used by the robot PC's mocap follower (its URDF; 2026-10-21): joint 2 -79..139 deg,
+# joint 3 -79..139 deg, joint 5 +-94 deg, joints 1/4/6 +-179 deg (the Isaac rig model allows 1 deg more on 2, 3, 5).
+# The follower clamps targets 0.05 rad (2.9 deg) inside these, so teleop's limit_margin_deg must be larger than that.
 JOINTS = [
     ((0, 0, 0.1462),     (0, 0, math.pi), (0, 0, 1),  -3.1241,  3.1241),   # joint1
-    ((0, 0.0265, 0.106),  (0, 0, 0),       (0, -1, 0), -1.396263, 2.4435),  # joint2 (lower: igus spec, -80 deg)
-    ((0, -0.0265, 0.24152), (0, 0, 0),     (0, -1, 0), math.radians(15.0), 2.443461), # joint3 (upper: igus spec, 140 deg, limit to 15 deg to prevent down elbow)
+    ((0, 0.0265, 0.106),  (0, 0, 0),       (0, -1, 0), math.radians(-79.0), math.radians(139.0)),  # joint2
+    ((0, -0.0265, 0.24152), (0, 0, 0),     (0, -1, 0), math.radians(15.0), math.radians(139.0)),  # joint3 (lower: elbow-up bound, not the robot's -79)
     ((0.001345, 0, 0.157479), (0, 0, 0),   (0, 0, 1),  -3.12414, 3.12414), # joint4
-    ((0, 0, 0.142),       (0, 0, 0),       (0, -1, 0), -1.65806, 1.65806), # joint5
+    ((0, 0, 0.142),       (0, 0, 0),       (0, -1, 0), math.radians(-94.0), math.radians(94.0)),   # joint5
     ((0, 0, 0.0768),      (0, 0, 0),       (0, 0, 1),  -3.12414, 3.12414), # joint6
 ]
 
 LOWER = np.array([j[3] for j in JOINTS])
 UPPER = np.array([j[4] for j in JOINTS])
 HW_LOWER = LOWER.copy()
-HW_LOWER[2] = math.radians(-80.0)                 # the robot's joint-3 limit; LOWER[2] is the IK's 15 deg elbow-up bound
+HW_LOWER[2] = math.radians(-79.0)                 # the robot's joint-3 limit; LOWER[2] is the IK's 15 deg elbow-up bound
 VMAX = math.radians(45.0)                       # rad/s, every joint (URDF velocity limit)
 
 # HOME: all joints at 0 = the arm straight up (a wrist singularity, gripper at the ceiling).
@@ -81,6 +84,13 @@ def clamp_roll(q6_ref, twist_acc, gain, lo, hi):
     if clipped != q6 and gain != 0.0:
         twist_acc = (clipped - q6_ref) / gain
     return clipped, twist_acc
+
+
+def drop_unreachable(hand_ref_p, wanted_p, reached_p, scale_trans):
+    """Keep following at a limit: move the hand anchor so that the mapped target (anchor-relative hand motion x scale)
+    equals the point the arm can actually reach. The hand motion beyond the limit is forgotten, so the arm follows again as
+    soon as the hand moves any other way. Returns the new anchor position."""
+    return np.asarray(hand_ref_p, float) + (np.asarray(wanted_p, float) - np.asarray(reached_p, float)) / scale_trans
 
 
 def rot(axis, a):

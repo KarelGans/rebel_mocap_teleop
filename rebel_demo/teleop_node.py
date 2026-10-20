@@ -36,15 +36,20 @@ Parameters (defaults in brackets)
                           (the launch file gives each teleop node its own topic and joint_merger forwards them)
   publish_joint_states [false]   true = also publish /joint_states (stand-alone testing; the launch uses joint_merger)
   feedback_from_joint_states [false]  true = seed IK from Isaac's joint states instead of last command
-  limit_margin_deg [1]    never publish a joint closer than this to its hardware limit (joints 1/4/6 stop at +-178 deg,
-                          joints 2/3 at -79..139, joint 5 at +-94): a real controller can fault or stop at its limits.
-                          The IK uses the same range. 0 = use the full range
+  limit_margin_deg [5]    never publish a joint closer than this to its limit (joints 1/4/6 stop at +-174 deg, joints 2/3
+                          at -74..134, joint 5 at +-89): the robot PC's mocap follower clamps 2.9 deg inside the limits, so
+                          everything we send stays followable. The IK uses the same range. 0 = use the full range
+  limit_follow [true]     at a joint limit (or the workspace box), forget the hand motion the arm cannot follow: the arm
+                          waits at the limit and follows at once when the hand moves any other way (false: the hand has
+                          to come all the way back to where the arm stopped first)
   limit_warn_mm [5]       warn "joint limit reached" when the IK is further than this from the target and a joint
                           sits at a limit (the elbow-up bound counts); also warns when the workspace box clamps the target
   reanchor_after [2.0]    s of lost tracking before the clutch re-anchors (shorter gaps: hold, keep the anchor)
   max_hand_speed [2.0]    m/s; a sample jumping further than this (+1 cm) is a marker glitch and ignored for up to 0.1 s
   max_tool_speed [0.5]    m/s; the IK target never moves faster (smooth catch-up after a tracking gap)
   home_wait [1.0]         s to wait for joint states at start; the robot then moves from there to HOME
+  require_joint_states [false]   true = never assume a start pose: publish nothing until the measured joints arrive on
+                          joint_states_topic (real robot: its /joint_states), then move from there to HOME
   home_deg ["0 0 0 0 0 0"]  HOME pose, 6 joint angles in degrees (launch: home_deg:="0 0 100 0 50 0"); the start move
                           goes there and the IK's posture preference pulls towards it
   skip_home [false]       true = do not move to HOME at start: take the measured joints (all zeros if none arrive within
@@ -70,8 +75,8 @@ from std_msgs.msg import Bool
 from std_srvs.srv import SetBool, Trigger
 from tf2_ros import Buffer, TransformException, TransformListener
 
-from .kinematics import (JOINT_NAMES, LOWER, clamp_roll, fk, ik, limits_hit, parse_pose_deg, quat_to_matrix,
-                         scale_rotation, soft_limits, twist_about)
+from .kinematics import (JOINT_NAMES, LOWER, clamp_roll, drop_unreachable, fk, ik, limits_hit, parse_pose_deg,
+                         quat_to_matrix, scale_rotation, soft_limits, twist_about)
 
 
 def matrix_to_quat(R):
@@ -153,7 +158,9 @@ class Teleop(Node):
         self.home_wait = float(d("home_wait", 1.0).value)
         self.skip_home = bool(d("skip_home", False).value)
         self.home = parse_pose_deg(d("home_deg", "0 0 0 0 0 0").value)    # HOME [rad]; raises on bad input
-        self.margin_deg = float(d("limit_margin_deg", 1.0).value)
+        self.margin_deg = float(d("limit_margin_deg", 5.0).value)
+        self.limit_follow = bool(d("limit_follow", True).value)
+        self.require_js = bool(d("require_joint_states", False).value)
         # IK range (soft limits + elbow-up bound) and the range a published command may never leave
         self.ik_lo, self.ik_hi, self.out_lo, self.out_hi = soft_limits(self.margin_deg)
         home = np.clip(self.home, self.out_lo, self.out_hi)
@@ -171,6 +178,7 @@ class Teleop(Node):
             raise ValueError(f"joint_names needs 6 comma-separated names, got {len(custom)}: {custom}")
         self.joint_names = custom or [prefix + n for n in JOINT_NAMES]
         js_topic = d("joint_states_topic", "/dual_arm/isaac_joint_states").value
+        self.js_topic = js_topic
 
         self.tf = Buffer()
         self.tf_listener = TransformListener(self.tf, self, spin_thread=True)   # TF never waits for the IK
@@ -247,6 +255,11 @@ class Teleop(Node):
         if self.q_cmd is None:                                     # wait for the measured start pose
             now = self.get_clock().now().nanoseconds * 1e-9
             self.t_start = self.t_start or now
+            if self.q_meas is None and self.require_js:
+                self.get_logger().warn(f"waiting for the measured joints ({self.joint_names[0]}..) on {self.js_topic} - "
+                                       "nothing is published until they arrive (require_joint_states)",
+                                       throttle_duration_sec=3.0)
+                return
             if self.q_meas is None and now - self.t_start < self.home_wait:
                 return
             # start from the measured pose as it is (may be outside the IK bounds, e.g. Isaac's straight-up start with
@@ -381,7 +394,9 @@ class Teleop(Node):
             self.twist_prev = twist
             q_ik[5], self.twist_acc = clamp_roll(self.q6_ref, self.twist_acc, self.roll_sign * self.scale_rot,
                                                  self.ik_lo[5], self.ik_hi[5])
-        hits = limits_hit(q_ik, self.ik_lo, self.ik_hi) if pe > self.limit_warn else []
+        pinned = limits_hit(q_ik, self.ik_lo, self.ik_hi)          # joints at an IK limit (the elbow-up bound counts)
+        # with limit_follow the unreachable part is dropped every cycle, so the IK is never far off: 2 mm counts
+        hits = pinned if pe > (0.002 if self.limit_follow else self.limit_warn) else []
         if hits:                                           # a joint limit is what keeps the IK off the target
             self.limit_active = True
             kind = "soft limit" if self.margin_deg > 0 else "limit"
@@ -389,15 +404,23 @@ class Teleop(Node):
                 f"{self.joint_names[i]} at {side} "
                 f"{'elbow-up bound' if (i == 2 and side == 'lower' and self.ik_lo[2] == LOWER[2]) else kind} "
                 f"{np.degrees(self.ik_lo[i] if side == 'lower' else self.ik_hi[i]):.0f} deg" for i, side in hits)
-            self.get_logger().warn(f"joint limit reached: {what} - target {pe * 1000:.0f} mm out of reach, "
-                                   f"moving to the closest reachable pose", throttle_duration_sec=1.0)
+            tail = ("hand motion beyond it is ignored, the arm follows again as soon as the hand moves another way"
+                    if self.limit_follow else
+                    f"target {pe * 1000:.0f} mm out of reach, moving to the closest reachable pose")
+            self.get_logger().warn(f"joint limit reached: {what} - {tail}", throttle_duration_sec=1.0)
         else:
-            if self.limit_active and pe <= self.limit_warn:
+            if self.limit_active and not pinned:
                 self.limit_active = False
                 self.get_logger().info("joint limits: target back in range")
             if pe > 0.02:
                 self.get_logger().warn(f"target not reachable ({pe * 1000:.0f} mm off) - moving as close as possible",
                                        throttle_duration_sec=1.0)
+        if self.limit_follow and self.scale_trans > 0 and (hits or np.any(np.abs(beyond) > 1e-3)):
+            # keep following: the hand motion past the limit (or the workspace box) is forgotten, so the target stays at
+            # the closest reachable point and the arm follows at once when the hand moves any other way
+            reached = fk(q_ik)[:3, 3]
+            self.hand_ref = (drop_unreachable(self.hand_ref[0], wanted, reached, self.scale_trans), self.hand_ref[1])
+            self.target = reached.copy()
         # 6. joint speed limit
         dq = np.clip(q_ik - self.q_cmd, -self.vmax * self.dt, self.vmax * self.dt)
         # never past the soft limits; a joint that already is beyond them (e.g. the measured start pose) may only move

@@ -3,8 +3,8 @@ import math
 
 import numpy as np
 
-from src.rebel_demo.kinematics import (HOME, LOWER, UPPER, clamp_roll, fk, ik, parse_pose_deg, quat_to_matrix, rot,
-                                       scale_rotation, soft_limits, twist_about)
+from rebel_demo.kinematics import (HOME, HW_LOWER, LOWER, UPPER, clamp_roll, drop_unreachable, fk, ik, limits_hit,
+                                   parse_pose_deg, quat_to_matrix, rot, scale_rotation, soft_limits, twist_about)
 
 # the bent-elbow "ready" pose (the former HOME; HOME is now all zeros = arm straight up)
 READY = np.radians([0.0, 13.4, 87.9, 0.0, 78.7, 0.0])
@@ -18,7 +18,7 @@ def test_home_pose():
 
 
 def test_analytic_jacobian():
-    from src.rebel_demo.kinematics import fk_jac
+    from rebel_demo.kinematics import fk_jac
     q = np.radians([10, 30, 60, -20, 40, 15])
     T, J = fk_jac(q)
     for i in range(6):
@@ -27,9 +27,12 @@ def test_analytic_jacobian():
         assert np.allclose((fk(q + dq)[:3, 3] - T[:3, 3]) / 1e-6, J[:3, i], atol=1e-5)
 
 
-def test_spec_sheet_limits():
-    assert math.isclose(LOWER[1], math.radians(-80), abs_tol=1e-5)    # joint2
-    assert math.isclose(UPPER[2], math.radians(140), abs_tol=1e-5)    # joint3
+def test_real_rebel_limits():
+    """The real ReBeL's limits as used by the robot PC's mocap follower (2026-10-21)."""
+    deg = np.degrees
+    assert np.allclose(deg(UPPER), [179, 139, 139, 179, 94, 179], atol=0.01)
+    assert np.allclose(deg(HW_LOWER), [-179, -79, -79, -179, -94, -179], atol=0.01)
+    assert math.isclose(deg(LOWER[2]), 15.0)                               # the IK's elbow-up bound on joint 3
 
 
 def test_ik_round_trip():
@@ -110,7 +113,7 @@ def test_keyboard_debounce():
 
 
 def test_limits_hit():
-    from src.rebel_demo.kinematics import limits_hit
+    from rebel_demo.kinematics import limits_hit
     assert limits_hit(READY) == []                                   # READY is well inside every limit
     q = READY.copy()
     q[1], q[2] = UPPER[1], LOWER[2]                                 # shoulder at its upper limit, elbow at the bound
@@ -158,7 +161,7 @@ def test_parse_pose_deg_and_start_pose():
         except ValueError:
             continue
         raise AssertionError(f"accepted {bad!r}")                             # joint5 120 > 95; joint3 -100 < -80
-    from src.rebel_demo.kinematics import limits_hit
+    from rebel_demo.kinematics import limits_hit
     assert limits_hit(q) == []                                               # well inside every limit
     T = fk(q)
     assert np.allclose(T[:3, 3], [0.36, 0, 0.33], atol=0.01)
@@ -186,9 +189,9 @@ def test_scale_rotation():
 def test_soft_limits_values():
     ik_lo, ik_hi, out_lo, out_hi = soft_limits(10.0)
     deg = np.degrees
-    assert np.allclose(deg(ik_hi), [169, 130, 130, 169, 85, 169], atol=0.01)
-    assert np.allclose(deg(ik_lo), [-169, -70, 15, -169, -85, -169], atol=0.01)       # joint 3 keeps the elbow-up bound
-    assert np.allclose(deg(out_lo), [-169, -70, -70, -169, -85, -169], atol=0.01)     # outputs: hardware limits - margin
+    assert np.allclose(deg(ik_hi), [169, 129, 129, 169, 84, 169], atol=0.01)
+    assert np.allclose(deg(ik_lo), [-169, -69, 15, -169, -84, -169], atol=0.01)       # joint 3 keeps the elbow-up bound
+    assert np.allclose(deg(out_lo), [-169, -69, -69, -169, -84, -169], atol=0.01)     # outputs: hardware limits - margin
     lo0, hi0, _, _ = soft_limits(0.0)
     assert np.allclose(lo0, LOWER) and np.allclose(hi0, UPPER)                          # 0 = the old behaviour
 
@@ -237,8 +240,56 @@ def test_full_pose_teleop_loop_stays_inside_the_margin():
     assert worst <= math.degrees(out_hi[3]) + 1e-6 < 169.01                # +-169 deg, not the +-179 deg hard limit
 
 
-def test_default_one_degree_margin():
-    ik_lo, ik_hi, out_lo, out_hi = soft_limits(1.0)
-    assert np.allclose(np.degrees(out_hi), [178, 139, 139, 178, 94, 178], atol=0.01)
-    assert np.allclose(np.degrees(out_lo), [-178, -79, -79, -178, -94, -178], atol=0.01)
+def test_default_margin_stays_inside_the_follower_clamp():
+    """Default limit_margin_deg = 5: everything published is >= 2 deg inside the follower's clamp (limits - 0.05 rad)."""
+    ik_lo, ik_hi, out_lo, out_hi = soft_limits(5.0)
+    assert np.allclose(np.degrees(out_hi), [174, 134, 134, 174, 89, 174], atol=0.01)
+    assert np.allclose(np.degrees(out_lo), [-174, -74, -74, -174, -89, -174], atol=0.01)
     assert np.allclose(np.degrees(ik_lo)[2], 15.0)                                       # elbow-up bound unchanged
+    clamp_lo, clamp_hi = HW_LOWER + 0.05, UPPER - 0.05
+    spare = math.radians(2.0)
+    assert np.all(out_hi <= clamp_hi - spare) and np.all(out_lo >= clamp_lo + spare)
+
+
+def test_drop_unreachable_puts_the_target_on_the_reached_point():
+    robot_ref, hand_ref, scale = np.array([0.36, 0.0, 0.33]), np.array([1.0, 2.0, 0.5]), 0.7
+    hand_now = hand_ref + np.array([0.40, 0.05, -0.02])
+    wanted = robot_ref + scale * (hand_now - hand_ref)
+    reached = np.array([0.58, 0.03, 0.32])                                   # the arm's limit stopped it here
+    new_ref = drop_unreachable(hand_ref, wanted, reached, scale)
+    assert np.allclose(robot_ref + scale * (hand_now - new_ref), reached)    # the mapped target is now reachable
+    assert np.allclose(robot_ref + scale * (hand_now + [-0.01, 0, 0] - new_ref), reached + [-scale * 0.01, 0, 0])
+
+
+def _replay(follow):
+    """teleop's per-cycle position mapping: hand 80 cm forward (far beyond reach) and back, 0.4 m/s, real limits."""
+    dt, vmax = 1 / 60, math.radians(45)
+    ik_lo, ik_hi, out_lo, out_hi = soft_limits(5.0)
+    q_cmd = np.radians([0, 0, 60, 0, 50, 0])
+    ref = fk(q_cmd)
+    hand_ref, robot_ref = np.zeros(3), ref[:3, 3].copy()
+    tool, cmds = [], []
+    for k in range(int(4.0 / dt)):
+        t = k * dt
+        hand = np.array([0.4 * min(t, 2.0) - 0.4 * max(0.0, t - 2.0), 0.0, 0.0])
+        T = ref.copy()
+        wanted = robot_ref + (hand - hand_ref)
+        T[:3, 3] = np.clip(wanted, [-0.7, -0.7, -0.45], [0.7, 0.7, 0.95])
+        q_ik, pe, _ = ik(T, q_cmd, w_rot=0.0, iters=25, q_rest=np.radians([0, 0, 60, 0, 50, 0]), lower=ik_lo, upper=ik_hi)
+        hits = limits_hit(q_ik, ik_lo, ik_hi) if pe > 0.002 else []
+        if follow and (hits or np.any(np.abs(wanted - T[:3, 3]) > 1e-3)):
+            hand_ref = drop_unreachable(hand_ref, wanted, fk(q_ik)[:3, 3], 1.0)
+        dq = np.clip(q_ik - q_cmd, -vmax * dt, vmax * dt)
+        q_cmd = np.clip(q_cmd + dq, np.minimum(out_lo, q_cmd), np.maximum(out_hi, q_cmd))
+        assert np.all(q_cmd >= out_lo - 1e-9) and np.all(q_cmd <= out_hi + 1e-9)
+        tool.append(fk(q_cmd)[0, 3])
+        cmds.append(q_cmd.copy())
+    turn = int(2.0 / dt)                                   # the hand turns back here
+    back = next(i for i in range(turn, len(tool)) if tool[i] < tool[turn] - 0.005)
+    return (back - turn) * dt                              # time until the tool has visibly (5 mm) come back
+
+
+def test_keep_following_after_a_limit():
+    """The 'same data although I moved my hand' case: with limit_follow the arm comes back as soon as the hand does."""
+    assert _replay(follow=False) > 1.0                 # old: more than a second of no response after the hand turned
+    assert _replay(follow=True) < 0.25                 # new: comes back at once (the rest is the joint speed limit)

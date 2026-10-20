@@ -105,7 +105,9 @@ def setup(context):
                               "base_frame": arm["base_frame"],
                               "joint_prefix": arm["prefix"],
                               "joint_names": a("joint_names"),
-                              "joint_states_topic": js_topic,
+                              # the robot's own measured joints (start pose), separate from the rig-model topic below
+                              "joint_states_topic": a("robot_joint_states_topic") or js_topic,
+                              "require_joint_states": a("require_joint_states").lower() == "true",
                               "hand_frame": arm["hand"],
                               "scale_trans": float(a("scale_trans") or a("scale") or "1.0"),
                               "scale_rot": float(a("scale_rot")),
@@ -116,6 +118,7 @@ def setup(context):
                               "max_joint_speed_deg": float(a("max_joint_speed_deg")),
                               "skip_home": a("skip_home").lower() == "true",
                               "limit_margin_deg": float(a("limit_margin_deg")),
+                              "limit_follow": a("limit_follow").lower() == "true",
                               "home_deg": a("home_deg"),
                               "limit_warn_mm": float(a("limit_warn_mm")),
                               "workspace_min": [float(v) for v in a("workspace_min").split()],
@@ -191,8 +194,17 @@ def generate_launch_description():
           description="start pose of every arm, 6 joint angles [deg] (e.g. \"0 0 100 0 50 0\"); the arm moves there at start"),
         D("skip_home", default_value="false",
           description="true = do not move to HOME at start (robot already there); engage right away"),
-        D("limit_margin_deg", default_value="1",
-          description="never publish a joint closer than this [deg] to its hardware limit (0 = full range)"),
+        D("limit_margin_deg", default_value="5",
+          description="never publish a joint closer than this [deg] to its limit; must be larger than the real robot's "
+                      "follower margin (2.9 deg) so it never clamps what we send (0 = full range)"),
+        D("limit_follow", default_value="true",
+          description="at a joint limit, forget the hand motion the arm cannot follow: it follows at once when the hand moves "
+                      "another way (false: the hand must come back to where the arm stopped)"),
+        D("robot_joint_states_topic", default_value="",
+          description="the robot's measured joints for teleop's start pose (real robot: /joint_states, names "
+                      "arm_left_joint1..6 / arm_right_joint1..6); '' = joint_states_topic"),
+        D("require_joint_states", default_value="false",
+          description="true = publish nothing until the measured joints arrive (never assume an all-zero start pose)"),
         D("limit_warn_mm", default_value="5", description="warn 'joint limit reached' when the IK is this far [mm] off the target"),
         D("workspace_min", default_value="-0.7 -0.7 -0.45", description="IK target clamp min x y z in the arm base frame [m]"),
         D("workspace_max", default_value="0.7 0.7 0.95",
