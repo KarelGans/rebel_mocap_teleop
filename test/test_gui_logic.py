@@ -47,12 +47,14 @@ def test_isaac_profile_has_no_real_robot_flags():
 
 def test_optional_arguments_only_when_changed():
     base = as_dict(build_teleop_cmd(BUILTIN_PROFILES["Isaac Sim"]))
-    assert not {"scale_rot", "roll_sign", "skip_home", "mocap_bridge", "limit_margin_deg"} & base.keys()
+    assert not {"scale_rot", "roll_sign", "skip_home", "mocap_bridge", "limit_margin_deg", "limit_recovery",
+                "limit_backoff_deg"} & base.keys()
     p = dict(BUILTIN_PROFILES["Isaac Sim"], scale_rot=0.5, roll_sign=-1, skip_home=True, mocap_bridge=False,
-             extra="limit_warn_mm:=10", limit_margin_deg=15)
+             extra="limit_warn_mm:=10", limit_margin_deg=15, limit_recovery=False, limit_backoff_deg=5)
     d = as_dict(build_teleop_cmd(p))
     assert d["scale_rot"] == "0.5" and d["roll_sign"] == "-1" and d["skip_home"] == "true"
     assert d["mocap_bridge"] == "false" and d["limit_warn_mm"] == "10" and d["limit_margin_deg"] == "15.0"
+    assert d["limit_recovery"] == "false" and d["limit_backoff_deg"] == "5.0"
 
 
 def test_arms_and_node_suffixes():

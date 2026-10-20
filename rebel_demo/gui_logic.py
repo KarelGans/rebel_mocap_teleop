@@ -27,6 +27,7 @@ _BASE = {
     "orientation": "semi", "roll_sign": 1, "gripper_mode": "orientation",
     "workspace_max": "0.7 0.7 1.4", "robot_ypr": "1.5708 0 0", "home_deg": "0 0 60 0 50 0",
     "skip_home": False, "mocap_bridge": True, "extra": "", "limit_margin_deg": 10.0,
+    "limit_recovery": True, "limit_backoff_deg": 3.0,
 }
 BUILTIN_PROFILES = {
     "Real robot": dict(_BASE, mode="real"),
@@ -74,6 +75,10 @@ def build_teleop_cmd(profile):
         cmd.append("skip_home:=true")
     if float(p["limit_margin_deg"]) != 10.0:
         cmd.append(f"limit_margin_deg:={_num(p['limit_margin_deg'])}")
+    if not p["limit_recovery"]:
+        cmd.append("limit_recovery:=false")
+    if float(p["limit_backoff_deg"]) != 3.0:
+        cmd.append(f"limit_backoff_deg:={_num(p['limit_backoff_deg'])}")
     if p["mode"] == "real":            # no Isaac: PC time, and the joint-state stream is made from the commands
         cmd += ["use_sim_time:=false", "fake_state:=true"]
     if not p["mocap_bridge"]:
@@ -132,6 +137,8 @@ def validate(profile):
             errs.append(f"{key} must be above 0")
     if not 0.0 <= float(p["limit_margin_deg"]) < 45.0:
         errs.append("limit_margin_deg must be 0..45")
+    if not 0.0 < float(p["limit_backoff_deg"]) <= 20.0:
+        errs.append("limit_backoff_deg must be above 0 and at most 20")
     if float(p["max_joint_speed_deg"]) > 45.0:
         errs.append("max_joint_speed_deg above 45 is faster than the real ReBeL maximum")
     try:
