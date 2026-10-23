@@ -77,7 +77,8 @@ assumed to be straight up) and drives to HOME in joint space at max_joint_speed_
   joint_states_topic [/dual_arm/isaac_joint_states]   where Isaac publishes the measured joints (feedback only)
   max_lead_deg [0]        the command is never more than this far ahead of the measured joints on joint_states_topic, so a
                           slower follower / real arm never falls far behind (HOME and teleop wait for it); 0 = off
-  feedback_timeout [0.5]  s; measured joints older than this are ignored (the lead limit is then inactive, with a warning)
+  feedback_timeout [0.5]  s; with max_lead_deg set, measured joints older than this HOLD the command (with a warning)
+                          until fresh ones arrive; it then moves back within max_lead_deg at the joint speed limit
 """
 import math
 
@@ -93,7 +94,7 @@ from std_srvs.srv import SetBool, Trigger
 from tf2_ros import Buffer, TransformException, TransformListener
 
 from .kinematics import (JOINT_NAMES, LOWER, clamp_roll, drop_unreachable, drop_unreachable_rot, fk, flip_rotation, ik,
-                         ik_priority, limit_lead, limits_hit, parse_pose_deg, quat_to_matrix, scale_into_lead,
+                         ik_priority, lead_step, limit_lead, limits_hit, parse_pose_deg, quat_to_matrix, scale_into_lead,
                          scale_rotation, soft_limits, step_toward, toward_point, toward_rot, twist_about)
 
 
@@ -308,8 +309,8 @@ class Teleop(Node):
             return
         d = self.home - self.q_cmd
         n = np.max(np.abs(d)) / (self.vmax * self.dt)              # cycles the slowest joint needs
-        self.q_cmd = self.home.copy() if n <= 1 else self.q_cmd + d / n
-        self.q_cmd = self.hold_lead(self.q_cmd)                    # slow robot: HOME waits for it
+        q_next = self.home.copy() if n <= 1 else self.q_cmd + d / n
+        self.q_cmd = self.hold_lead(self.q_cmd, q_next)            # slow robot: HOME waits for it
         if np.array_equal(self.q_cmd, self.home):                  # arrived (only if the lead clamp left it at HOME)
             self.homing = False
             self.get_logger().info("at HOME - call ~/engage true to start")
@@ -508,15 +509,22 @@ class Teleop(Node):
         lo, hi = np.minimum(self.out_lo, self.q_cmd), np.maximum(self.out_hi, self.q_cmd)
         q_next = np.clip(q_next, lo, hi)
         q_next = self.hold_lead_path(self.q_cmd, q_next)  # slow robot: the whole step shortens, the path is kept
-        self.q_cmd = self.hold_lead(q_next)                # robot behind: never more than max_lead ahead of it
+        self.q_cmd = self.hold_lead(self.q_cmd, q_next)    # robot behind: never more than max_lead ahead of it
         self.publish(self.q_cmd)                           # 7.
+
+    def feedback_age(self):
+        """s since the last measured joints arrived (None: never)."""
+        return None if self.t_meas is None else self.get_clock().now().nanoseconds * 1e-9 - self.t_meas
 
     def hold_lead_path(self, q_prev, q_new):
         """Step q_prev -> q_new shortened as a whole (scale_into_lead) so it stays within max_lead_deg of the fresh
-        measured joints: the arm waits for the slow real arm and the tool keeps its path. q_new if off / no feedback."""
-        age = self.get_clock().now().nanoseconds * 1e-9 - self.t_meas if self.t_meas is not None else None
-        if self.max_lead <= 0 or self.q_meas is None or age > self.fb_timeout:
-            return q_new                                   # hold_lead warns about missing joint states
+        measured joints: the arm waits for the slow real arm and the tool keeps its path. q_new if off; q_prev (hold)
+        while the measured joints are missing or stale (hold_lead warns)."""
+        if self.max_lead <= 0:
+            return q_new
+        age = self.feedback_age()
+        if age is None or age > self.fb_timeout:
+            return q_prev
         out = scale_into_lead(q_prev, q_new, self.q_meas, self.max_lead)
         if not np.allclose(out, q_new):
             lag = np.abs(q_new - self.q_meas)
@@ -526,18 +534,22 @@ class Teleop(Node):
                 f"max_lead_deg {math.degrees(self.max_lead):.0f})", throttle_duration_sec=2.0)
         return out
 
-    def hold_lead(self, q):
-        """q limited to max_lead_deg ahead of the fresh measured joints (see limit_lead); q itself if off / no feedback."""
+    def hold_lead(self, q_prev, q):
+        """The command for this cycle, q, limited to max_lead_deg ahead of the fresh measured joints (see limit_lead).
+        q itself if the limit is off. While the measured joints are missing or older than feedback_timeout the command
+        HOLDS at q_prev: running on without knowing where the arm is would leave it far behind, and the clamp would then
+        pull the command back in one big step when the joint states return (the follower answers a step > 0.2 rad with
+        catch-up). Moving back into the window after a gap is limited to the joint speed limit, so it never jumps."""
         if self.max_lead <= 0:
             return q
-        age = self.get_clock().now().nanoseconds * 1e-9 - self.t_meas if self.t_meas is not None else None
-        if self.q_meas is None or age > self.fb_timeout:
+        age = self.feedback_age()
+        if age is None or age > self.fb_timeout:
             self.get_logger().warn(
-                "max_lead_deg is set but no fresh joint states - lead limit inactive"
-                + ("" if age is None else f" (last {age:.1f} s ago)"), throttle_duration_sec=5.0)
-            return q
-        out = limit_lead(q, self.q_meas, self.max_lead)
-        if not np.array_equal(out, q):
+                f"max_lead_deg is set but no fresh joint states on {self.js_topic} - holding the command"
+                + ("" if age is None else f" (last {age:.1f} s ago)"), throttle_duration_sec=2.0)
+            return lead_step(q_prev, q, None, self.max_lead, 0.0)
+        out = lead_step(q_prev, q, self.q_meas, self.max_lead, self.vmax * self.dt)
+        if not np.array_equal(limit_lead(q, self.q_meas, self.max_lead), q):
             lag = np.abs(q - self.q_meas)
             i = int(np.argmax(lag))
             self.get_logger().warn(

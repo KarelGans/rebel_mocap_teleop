@@ -222,6 +222,24 @@ def _follow(max_lead_deg, seconds=5.0, rate=60.0):
     return worst
 
 
+def test_lead_step_holds_without_feedback_and_never_jumps():
+    from rebel_demo.kinematics import lead_step
+    lead, step = math.radians(20), math.radians(45) / 60
+    q_prev = np.radians([0.0, 0.0, 60.0, 0.0, 50.0, 0.0])
+    q = q_prev + step * np.array([1.0, 0, 0, 0, 0, 0])
+    assert np.array_equal(lead_step(q_prev, q, q_prev, lead, step), q)            # inside the window: unchanged, exact
+    assert np.array_equal(lead_step(q_prev, q, None, lead, step), q_prev)         # stale / missing feedback: hold
+    assert np.array_equal(lead_step(q_prev, q, None, 0.0, step), q)               # limit off: unchanged
+    # the arm fell 35 deg behind on joint 1 while the feedback was away: back into the window at the speed limit,
+    # never in one step (the follower answers a jump > 0.2 rad between two messages with catch-up)
+    far = q_prev + np.radians([35.0, 0, 0, 0, 0, 0])
+    out = lead_step(far, far, q_prev, lead, step)
+    assert math.isclose(float(np.max(np.abs(out - far))), step)
+    for _ in range(int(math.radians(15) / step) + 2):
+        out = lead_step(out, far, q_prev, lead, step)
+    assert np.allclose(out - q_prev, np.radians([20.0, 0, 0, 0, 0, 0]))         # ends on the window edge
+
+
 def test_lead_limit_keeps_slow_follower_close():
     assert _follow(0.0) > 1.75                                                # without it the follower would latch
     assert _follow(20.0) <= math.radians(20) + 1e-9

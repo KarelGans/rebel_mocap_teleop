@@ -215,6 +215,22 @@ def limit_lead(q_cmd, q_meas, max_lead):
     return np.clip(q_cmd, q_meas - max_lead, q_meas + max_lead)
 
 
+def lead_step(q_prev, q, q_meas, max_lead, max_step):
+    """One cycle of the lead limit for a slow real arm: the command q clipped to q_meas +- max_lead (limit_lead), moving
+    from q_prev by at most max_step on the largest joint (all joints scaled together), so coming back into the window
+    after the arm fell behind never jumps. q_meas None (the measured joints are missing or stale) -> hold at q_prev.
+    max_lead <= 0 -> q unchanged."""
+    q = np.asarray(q, float)
+    if max_lead <= 0:
+        return q.copy()
+    if q_meas is None:
+        return np.array(q_prev, float)
+    out = limit_lead(q, q_meas, max_lead)
+    q_prev = np.asarray(q_prev, float)
+    m = float(np.max(np.abs(out - q_prev)))
+    return out if m <= max_step else q_prev + (out - q_prev) * (max_step / m)
+
+
 def fk_jac(q):
     """Flange pose (4x4, base_link) and its geometric Jacobian (6x6: rows 0-2 linear, 3-5 angular) in one pass."""
     R, p = np.eye(3), np.zeros(3)
