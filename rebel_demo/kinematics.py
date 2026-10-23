@@ -22,18 +22,23 @@ JOINT_COLORS = [(0.90, 0.10, 0.10), (1.00, 0.55, 0.00), (0.95, 0.85, 0.10),
 #     ((0, 0, 0.1208), (0, 0, 0), (0, 0, 1), -math.pi * 179 / 180, math.pi * 179 / 180),
 # ]
 
-# for isaac: igus_rebel2_arm_macro.xacro (fixed motor joints merged), spec-sheet limits
+# geometry: igus_rebel2_arm_macro.xacro (fixed motor joints merged).
+# Limits: the real ReBeL, as used by the robot PC's mocap follower (its URDF; 2026-10-21): joint 2 -79..139 deg,
+# joint 3 -79..139 deg, joint 5 +-94 deg, joints 1/4/6 +-179 deg (the Isaac rig model allows 1 deg more on 2, 3, 5).
+# The follower clamps targets 0.05 rad (2.9 deg) inside these, so teleop's limit_margin_deg must be larger than that.
 JOINTS = [
     ((0, 0, 0.1462),     (0, 0, math.pi), (0, 0, 1),  -3.1241,  3.1241),   # joint1
-    ((0, 0.0265, 0.106),  (0, 0, 0),       (0, -1, 0), -1.396263, 2.4435),  # joint2 (lower: igus spec, -80 deg)
-    ((0, -0.0265, 0.24152), (0, 0, 0),     (0, -1, 0), math.radians(15.0), 2.443461), # joint3 (upper: igus spec, 140 deg, limit to 15 deg to prevent down elbow)
+    ((0, 0.0265, 0.106),  (0, 0, 0),       (0, -1, 0), math.radians(-79.0), math.radians(139.0)),  # joint2
+    ((0, -0.0265, 0.24152), (0, 0, 0),     (0, -1, 0), math.radians(15.0), math.radians(139.0)),  # joint3 (lower: elbow-up bound, not the robot's -79)
     ((0.001345, 0, 0.157479), (0, 0, 0),   (0, 0, 1),  -3.12414, 3.12414), # joint4
-    ((0, 0, 0.142),       (0, 0, 0),       (0, -1, 0), -1.65806, 1.65806), # joint5
+    ((0, 0, 0.142),       (0, 0, 0),       (0, -1, 0), math.radians(-94.0), math.radians(94.0)),   # joint5
     ((0, 0, 0.0768),      (0, 0, 0),       (0, 0, 1),  -3.12414, 3.12414), # joint6
 ]
 
 LOWER = np.array([j[3] for j in JOINTS])
 UPPER = np.array([j[4] for j in JOINTS])
+HW_LOWER = LOWER.copy()
+HW_LOWER[2] = math.radians(-79.0)                 # the robot's joint-3 limit; LOWER[2] is the IK's 15 deg elbow-up bound
 VMAX = math.radians(45.0)                       # rad/s, every joint (URDF velocity limit)
 
 # HOME: all joints at 0 = the arm straight up (a wrist singularity, gripper at the ceiling).
@@ -52,13 +57,40 @@ def parse_pose_deg(text):
     if len(vals) != 6:
         raise ValueError(f"home_deg {text!r}: need 6 angles in degrees, got {len(vals)}")
     q = np.radians(vals)
-    lo = LOWER.copy()
-    lo[2] = math.radians(-80)                       # robot limit; LOWER[2] is the 15 deg elbow-up bound of the IK
+    lo = HW_LOWER
     bad = [f"joint{i + 1}={vals[i]:g} (allowed {math.degrees(lo[i]):.0f}..{math.degrees(UPPER[i]):.0f})"
            for i in range(6) if q[i] < lo[i] - 1e-9 or q[i] > UPPER[i] + 1e-9]
     if bad:
         raise ValueError(f"home_deg {text!r}: outside the joint limits: " + ", ".join(bad))
     return q
+
+
+def soft_limits(margin_deg):
+    """Joint ranges that keep `margin_deg` away from the robot's limits.
+    Returns (ik_lo, ik_hi, out_lo, out_hi) [rad]: the IK range (also keeps the 15 deg elbow-up bound) and the range a
+    published command may never leave (the hardware limits minus the margin)."""
+    if not 0.0 <= margin_deg < 45.0:
+        raise ValueError(f"limit_margin_deg must be 0..45, got {margin_deg}")
+    m = math.radians(margin_deg)
+    out_lo, out_hi = HW_LOWER + m, UPPER - m
+    return np.maximum(LOWER, out_lo), out_hi.copy(), out_lo, out_hi
+
+
+def clamp_roll(q6_ref, twist_acc, gain, lo, hi):
+    """Joint-6 target q6_ref + gain * twist_acc clipped to [lo, hi], with anti-windup: when it clips, the accumulated
+    twist is wound back to the limit, so turning the hand back moves the joint at once. Returns (q6, twist_acc)."""
+    q6 = q6_ref + gain * twist_acc
+    clipped = float(np.clip(q6, lo, hi))
+    if clipped != q6 and gain != 0.0:
+        twist_acc = (clipped - q6_ref) / gain
+    return clipped, twist_acc
+
+
+def drop_unreachable(hand_ref_p, wanted_p, reached_p, scale_trans):
+    """Keep following at a limit: move the hand anchor so that the mapped target (anchor-relative hand motion x scale)
+    equals the point the arm can actually reach. The hand motion beyond the limit is forgotten, so the arm follows again as
+    soon as the hand moves any other way. Returns the new anchor position."""
+    return np.asarray(hand_ref_p, float) + (np.asarray(wanted_p, float) - np.asarray(reached_p, float)) / scale_trans
 
 
 def rot(axis, a):
@@ -216,14 +248,16 @@ def _dls_step(J, e, free, lam, q, q_rest, k_null):
     return step
 
 
-def ik(T_goal, q_seed, w_rot=0.3, iters=60, lam=0.02, q_rest=HOME, k_null=0.05):
+def ik(T_goal, q_seed, w_rot=0.3, iters=60, lam=0.02, q_rest=HOME, k_null=0.05, lower=None, upper=None):
     """Flange pose T_goal (4x4, base_link) -> joint angles [rad] (damped least squares, analytic Jacobian).
     w_rot = 0 -> position only (wrist free, pulled gently towards q_rest).
     Joint limits are handled by pinning: a joint whose step would cross LOWER / UPPER is held at the limit and the
     step is solved again for the remaining joints, so an unreachable target gives the closest reachable pose (the arm
     slides along the limit) instead of a corner posture far from it.
     Returns (q, position_error_m, rotation_error_deg)."""
-    q = np.clip(np.asarray(q_seed, float).copy(), LOWER, UPPER)
+    lo = LOWER if lower is None else np.asarray(lower, float)     # joint range the IK may use (default: the limits)
+    hi = UPPER if upper is None else np.asarray(upper, float)
+    q = np.clip(np.asarray(q_seed, float).copy(), lo, hi)
     rows = 3 if w_rot == 0 else 6
     for _ in range(iters):
         T, J = fk_jac(q)
@@ -235,14 +269,14 @@ def ik(T_goal, q_seed, w_rot=0.3, iters=60, lam=0.02, q_rest=HOME, k_null=0.05):
         for _pass in range(4):
             step = fixed + _dls_step(J, e - J @ fixed, free, lam, q, q_rest, k_null)
             step = np.where(free, np.clip(step, -0.3, 0.3), fixed)
-            bad = free & ((q + step < LOWER) | (q + step > UPPER))
+            bad = free & ((q + step < lo) | (q + step > hi))
             if not bad.any():
                 break
             free &= ~bad                                      # pin them at the limit, re-solve the others
-            fixed[bad] = np.clip(q + step, LOWER, UPPER)[bad] - q[bad]
+            fixed[bad] = np.clip(q + step, lo, hi)[bad] - q[bad]
         if np.linalg.norm(e[:3]) < 1e-4 and np.linalg.norm(e[3:]) <= 1e-3 * w_rot and np.linalg.norm(step) < 1e-4:
             break
-        q = np.clip(q + step, LOWER, UPPER)
+        q = np.clip(q + step, lo, hi)
     T = fk(q)
     pe = float(np.linalg.norm(T_goal[:3, 3] - T[:3, 3]))
     re = float(math.degrees(np.linalg.norm(_log_so3(T_goal[:3, :3] @ T[:3, :3].T))))
@@ -250,8 +284,8 @@ def ik(T_goal, q_seed, w_rot=0.3, iters=60, lam=0.02, q_rest=HOME, k_null=0.05):
 
 
 # ---------------------------------------------------------------- full pose (orientation:=true): robot_remote's method
-# github.com/Patrick-zhuyanxun/robot_remote, quest_teleop/quest_arm_teleop.py (IK) and quest_dual_arm_teleop.py
-# (rate-limited Cartesian command, anti-windup lead clamp). Same functions as on branch dev-UI (a6cf63b).
+# github.com/Patrick-zhuyanxun/robot_remote, quest_teleop/quest_arm_teleop.py (IK, step_toward) and
+# quest_dual_arm_teleop.py (rate-limited Cartesian command, anti-windup lead clamp).
 def ik_priority(T_goal, q_seed, lower=None, upper=None, iters=30, damping=0.02, rot_weight=1.0, tol=1e-4):
     """Task-priority damped-least-squares IK (robot_remote's SerialChain.ik): position is the primary task, orientation
     is solved in the null space of the position task, so an orientation the arm cannot realise never moves the tool.
@@ -297,6 +331,16 @@ def ik_priority(T_goal, q_seed, lower=None, upper=None, iters=30, damping=0.02, 
     return q, pe, re
 
 
+def step_toward(q_from, q_to, max_dq):
+    """robot_remote's joint speed limit: move toward q_to by at most max_dq on the largest joint, scaling ALL joints
+    uniformly. Per-joint clipping bends the joint-space direction and made the tool swing up to 15 cm during fast wrist
+    turns; uniform scaling keeps the IK's direction."""
+    q_from, q_to = np.asarray(q_from, float), np.asarray(q_to, float)
+    dq = q_to - q_from
+    m = float(np.max(np.abs(dq)))
+    return q_from + (dq * (max_dq / m) if m > max_dq else dq)
+
+
 def toward_point(p_from, p_to, max_dist):
     """p_from moved toward p_to by at most max_dist (rate limit; anti-windup lead clamp with p_from = the reached point)."""
     p_from, p_to = np.asarray(p_from, float), np.asarray(p_to, float)
@@ -318,12 +362,6 @@ def flip_rotation(R, signs):
     rv = np.asarray(signs, float) * _log_so3(np.asarray(R, float))
     a = float(np.linalg.norm(rv))
     return np.eye(3) if a < 1e-12 else rot(rv / a, a)
-
-
-def drop_unreachable(hand_ref_p, wanted_p, reached_p, scale_trans):
-    """Keep following at a limit: move the hand anchor so that the mapped target (anchor-relative hand motion x scale)
-    equals the point the arm can actually reach. Returns the new anchor position."""
-    return np.asarray(hand_ref_p, float) + (np.asarray(wanted_p, float) - np.asarray(reached_p, float)) / scale_trans
 
 
 def drop_unreachable_rot(R_hand, R_reached, R_robot_ref, scale_rot, signs=(1.0, 1.0, 1.0)):

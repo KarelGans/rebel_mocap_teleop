@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Fake Isaac Sim for testing the rig without the simulator: stands in for dual_arm_rig_ros2_bridge.py.
 
-  /clock                           simulation time (starts at 0, runs at real speed)
+  /clock                           simulation time (starts at 0, runs at --speed x real time, like a heavy Isaac at 0.5)
   /dual_arm/isaac_joint_commands   subscribed: position targets by joint name (like the Articulation Controller;
                                    unknown names are reported, as Isaac would)
   /dual_arm/isaac_joint_states     published at 60 Hz, stamped with simulation time: every rig joint, starting at 0
@@ -31,6 +31,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--rate", type=float, default=60.0)
     ap.add_argument("--tau", type=float, default=0.05, help="drive lag [s] (first order); 0 = joints jump to targets")
+    ap.add_argument("--speed", type=float, default=1.0,
+                    help="real-time factor: 0.5 = the sim clock and the joint drives run at half speed (Isaac with cameras)")
     args = ap.parse_args()
 
     rclpy.init()
@@ -50,12 +52,12 @@ def main():
                 n.get_logger().error(f"Articulation Controller: unknown joint '{name}' (ignored)")
 
     n.create_subscription(JointState, "/dual_arm/isaac_joint_commands", on_cmd, 10)
-    n.get_logger().info(f"fake Isaac: {len(RIG_JOINTS)} rig joints at 0, sim clock running")
+    n.get_logger().info(f"fake Isaac: {len(RIG_JOINTS)} rig joints at 0, sim clock running at {args.speed:g}x real time")
     t0, dt = time.time(), 1.0 / args.rate
-    a = 1.0 if args.tau <= 0 else 1.0 - math.exp(-dt / args.tau)
+    a = 1.0 if args.tau <= 0 else 1.0 - math.exp(-dt * args.speed / args.tau)
     while rclpy.ok():
         start = time.time()
-        sim = start - t0
+        sim = (start - t0) * args.speed
         stamp = TimeMsg(sec=int(sim), nanosec=int((sim % 1) * 1e9))
         clock.publish(Clock(clock=stamp))
         for j in pos:

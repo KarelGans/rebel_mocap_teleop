@@ -30,7 +30,7 @@ Parameters (defaults in brackets)
   invert [false]           true = far closes, near opens
   joint_prefix [arm_left_xeg32_]    arm_left_xeg32_ / arm_right_xeg32_ on the dual-arm rig
   closed_pos [-0.0116631]  open_pos [0.00483688]   carriage joint values [m] (xeg32_gripper.urdf.xacro limits)
-  rate_hz [60]  max_speed [0.05] jaw speed [m/s]  stale_timeout [0.2]
+  rate_hz [60]  max_speed [0.02] jaw speed [m/s] (HIWIN XEG-32: 1-20 mm/s)  stale_timeout [0.2]
   start_open [true]
   debounce [0.1]   s the new state must hold before the gripper switches (one-frame marker glitches)
   command_topic [/dual_arm/isaac_joint_commands]   publish_joint_states [false]
@@ -50,6 +50,8 @@ from tf2_ros import Buffer, TransformException, TransformListener
 
 CARRIAGE_JOINTS = ["left_carriage_joint", "right_carriage_joint"]   # right mimics left in the model
 CLOSED_POS, OPEN_POS = -0.0116631, 0.00483688                        # joint limits = closed / open
+# 16.5 mm travel per jaw in the model; HIWIN XEG-32: 32 mm total stroke (16 mm per jaw), so ~/opening_mm is capped
+XEG32_STROKE_MM = 32.0
 
 
 def next_state(d, state, threshold, hysteresis, invert=False):
@@ -119,7 +121,7 @@ class Gripper(Node):
         self.closed = float(d("closed_pos", CLOSED_POS).value)
         self.open = float(d("open_pos", OPEN_POS).value)
         self.rate = float(d("rate_hz", 60.0).value)
-        self.vmax = float(d("max_speed", 0.05).value)
+        self.vmax = float(d("max_speed", 0.02).value)
         self.stale = float(d("stale_timeout", 0.2).value)
         topic = d("command_topic", "/dual_arm/isaac_joint_commands").value
         pub_js = bool(d("publish_joint_states", False).value)
@@ -220,7 +222,7 @@ class Gripper(Node):
             msg.name.append(self.camera_joint)
             msg.position.append(0.0)
             self.pub_js.publish(msg)
-        self.pub_mm.publish(Float64(data=2000.0 * (self.jaw - self.closed)))
+        self.pub_mm.publish(Float64(data=min(XEG32_STROKE_MM, 2000.0 * (self.jaw - self.closed))))
         self.pub_state.publish(Int32(data=self.state))
 
 

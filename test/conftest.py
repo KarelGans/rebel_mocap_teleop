@@ -1,5 +1,5 @@
-"""Make the package importable as `rebel_demo` from the repo root (python3 -m pytest test/), without a build."""
+"""Lets `python3 -m pytest test/` import the package from this source tree (no build or sourcing needed)."""
 import os
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

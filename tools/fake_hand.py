@@ -21,12 +21,13 @@ open), then curls to 5 cm during the 'forward' part (gripper closes) and opens a
   --unstable                    bad mocap: marker jitter, drop-outs (rigid body missing), frozen frames (Motive repeats
                                 the last pose), single-frame outliers (marker swap); or set them one by one
   --rotate-finger               close the gripper by turning the fingertip body 150 deg (gripper_mode:=orientation)
-  --sim-time                    stamp with Isaac's /clock - needed with target:=isaac (teleop runs on sim time there)
+  --sim-time                    stamp with Isaac's /clock. Not for this version: teleop runs on the PC clock, also with
+                                target:=isaac, and would call sim-stamped hand poses stale (only for old launch files)
 
 Run after:  ros2 launch rebel_demo teleop.launch.py target:=rviz mocap_bridge:=false            (rig:=both default)
     python3 tools/fake_hand.py --loop
     python3 tools/fake_hand.py --pattern cross --loop   # up / down / left / right
-    python3 tools/fake_hand.py --sim-time               # with  ... target:=isaac  (Isaac or fake_isaac.py)
+    python3 tools/fake_hand.py --loop                   # also with  ... target:=isaac  (Isaac or fake_isaac.py)
     python3 tools/fake_hand.py --arm left               # with  ... rig:=left  (one arm; engage service /rebel_teleop/engage)
 """
 import argparse
@@ -111,7 +112,7 @@ def main():
     ap.add_argument("--rotate-finger", action="store_true",
                     help="close the gripper by rotating the fingertip body 150 deg (gripper_mode:=orientation) "
                          "instead of moving it closer")
-    ap.add_argument("--sim-time", action="store_true", help="use Isaac's /clock (target:=isaac)")
+    ap.add_argument("--sim-time", action="store_true", help="use Isaac's /clock (old launch files only)")
     ap.add_argument("--palm", default=None, help="one arm: palm streaming ID or frame name (default 1 for left, 3 for right)")
     ap.add_argument("--finger", default=None, help="one arm: fingertip streaming ID or frame name (default 2 for left, 4 for right)")
     args = ap.parse_args()

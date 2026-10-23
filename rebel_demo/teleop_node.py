@@ -1,12 +1,13 @@
 """teleop node - your hand (OptiTrack rigid body, via mocap4ros2_optitrack TF) drives the igus.
 
 Pipeline, every cycle (default 60 Hz):
-  1. TF lookup  base_frame <- hand_frame          (hand pose in the robot base frame)
+  1. TF lookup  base_frame <- world_frame <- hand_frame   (two lookups, so the mocap and robot clocks may differ)
   2. tracking check: missing / stale / frozen pose -> HOLD (robot keeps its last command)
   3. LOW-PASS filter on the hand pose            (position: 1st-order; orientation: slerp)
   4. clutch + mapping: relative (the hand moves the tool by the same amount x scale), workspace clamp
   5. real-time IK  target flange pose -> 6 joint angles, seeded with the last command
-  6. joint speed limit                            (max_joint_speed_deg; all joints scaled together, keeps the path)
+  6. joint speed limit                            (max_joint_speed_deg; all joints scaled together, keeps the path;
+                                                   orientation:=semi: joints 1-5 together, joint 6 on its own)
   7. publish sensor_msgs/JointState on command_topic (/dual_arm/isaac_joint_commands for the Isaac rig)
 
 Clutch : call the service  ~/engage  (std_srvs/SetBool)
@@ -22,6 +23,9 @@ While engaged:  robot_target = robot_pose_at_engage + scale_trans * (hand_now - 
 
 Parameters (defaults in brackets)
   base_frame [arm_left_base_link]  hand_frame [HAND]          TF frames (hand = rigid body name in mocap config)
+  world_frame [world]     the hand is looked up as world <- hand and base <- world separately and joined in code, so the
+                          mocap TF (this PC's clock) and the robot TF (Isaac's sim clock) never have to share a time;
+                          '' = one lookup base <- hand (both chains on the same clock)
   rate_hz [60]
   scale_trans [1.0]       gain on the hand's translation since engage; `scale` is an alias
   scale_rot [1.0]         gain on the hand's rotation since engage: the wrist rotation with orientation:=true, the joint 6
@@ -35,9 +39,6 @@ Parameters (defaults in brackets)
   max_tool_rot_speed_deg [90]  orientation:=true: the commanded tool rotation turns at most this fast (deg/s)
   max_tool_lead_m [0.05]  max_tool_lead_deg [15]  orientation:=true: anti-windup - how far the command may run ahead of
                           the pose of the commanded joints
-  limit_follow [true]     orientation:=true: at a joint limit (or the workspace box) forget the hand motion / rotation the
-                          arm cannot follow, so it follows again at once when the hand moves another way (false: wait
-                          until the hand is back where the arm stopped, as robot_remote does)
   roll_follow [false]     position only + joint 6 follows the hand's roll about the tool axis (launch: orientation:=semi)
   roll_sign [1.0]         joint6 = joint6 at engage + sign * scale_rot * hand twist; sign -1 flips the direction
   cutoff_hz [4.0]         low-pass cutoff for the hand pose
@@ -47,12 +48,22 @@ Parameters (defaults in brackets)
                           (the launch file gives each teleop node its own topic and joint_merger forwards them)
   publish_joint_states [false]   true = also publish /joint_states (stand-alone testing; the launch uses joint_merger)
   feedback_from_joint_states [false]  true = seed IK from Isaac's joint states instead of last command
+  limit_margin_deg [5]    never publish a joint closer than this to its limit (joints 1/4/6 stop at +-174 deg, joints 2/3
+                          at -74..134, joint 5 at +-89): the robot PC's mocap follower clamps 2.9 deg inside the limits, so
+                          everything we send stays followable. The IK uses the same range. 0 = use the full range
+  limit_follow [true]     at a joint limit (or the workspace box), forget the hand motion / rotation the arm cannot
+                          follow: the arm waits at the limit and follows at once when the hand moves any other way. The
+                          forgotten part stays forgotten, like a clutch re-grab: after pushing 2 cm past a limit and coming
+                          back, the tool ends 2 cm from where it started (false: no offset, but the hand has to come all
+                          the way back to where the arm stopped before it moves again, as robot_remote does)
   limit_warn_mm [5]       warn "joint limit reached" when the IK is further than this from the target and a joint
                           sits at a limit (the elbow-up bound counts); also warns when the workspace box clamps the target
   reanchor_after [2.0]    s of lost tracking before the clutch re-anchors (shorter gaps: hold, keep the anchor)
   max_hand_speed [2.0]    m/s; a sample jumping further than this (+1 cm) is a marker glitch and ignored for up to 0.1 s
   max_tool_speed [0.5]    m/s; the IK target never moves faster (smooth catch-up after a tracking gap)
   home_wait [1.0]         s to wait for joint states at start; the robot then moves from there to HOME
+  require_joint_states [false]   true = never assume a start pose: publish nothing until the measured joints arrive on
+                          joint_states_topic (real robot: its /joint_states), then move from there to HOME
   home_deg ["0 0 60 0 50 0"]  HOME pose, 6 joint angles in degrees (launch: home_deg:="0 0 100 0 50 0"); the start move
                           goes there and the IK's posture preference pulls towards it
   skip_home [false]       true = do not move to HOME at start: take the measured joints (all zeros if none arrive within
@@ -81,9 +92,9 @@ from std_msgs.msg import Bool
 from std_srvs.srv import SetBool, Trigger
 from tf2_ros import Buffer, TransformException, TransformListener
 
-from .kinematics import (JOINT_NAMES, LOWER, UPPER, drop_unreachable, drop_unreachable_rot, fk, flip_rotation, ik,
+from .kinematics import (JOINT_NAMES, LOWER, clamp_roll, drop_unreachable, drop_unreachable_rot, fk, flip_rotation, ik,
                          ik_priority, limit_lead, limits_hit, parse_pose_deg, quat_to_matrix, scale_into_lead,
-                         scale_rotation, toward_point, toward_rot, twist_about)
+                         scale_rotation, soft_limits, step_toward, toward_point, toward_rot, twist_about)
 
 
 def matrix_to_quat(R):
@@ -142,6 +153,7 @@ class Teleop(Node):
         d = self.declare_parameter
         self.base_frame = d("base_frame", "arm_left_base_link").value
         self.hand_frame = d("hand_frame", "HAND").value
+        self.world_frame = d("world_frame", "world").value                # '' = one lookup base <- hand
         self.rate = float(d("rate_hz", 60.0).value)
         scale_alias = float(d("scale", 1.0).value)                        # old name of scale_trans
         self.scale_trans = float(d("scale_trans", scale_alias).value)
@@ -165,7 +177,6 @@ class Teleop(Node):
         self.max_rot_speed = math.radians(float(d("max_tool_rot_speed_deg", 90.0).value))
         self.tool_lead_m = float(d("max_tool_lead_m", 0.05).value)
         self.tool_lead = math.radians(float(d("max_tool_lead_deg", 15.0).value))
-        self.limit_follow = bool(d("limit_follow", True).value)
         signs = [float(v) for v in str(d("rot_axis_sign", "1 1 1").value).replace(",", " ").split()]
         if len(signs) != 3 or any(s not in (1.0, -1.0) for s in signs):
             raise ValueError(f"rot_axis_sign needs 3 values, each 1 or -1 (x y z of the robot base), got {signs}")
@@ -178,6 +189,16 @@ class Teleop(Node):
         self.max_lead = math.radians(float(d("max_lead_deg", 0.0).value))   # 0 = off
         self.fb_timeout = float(d("feedback_timeout", 0.5).value)
         self.home = parse_pose_deg(d("home_deg", "0 0 60 0 50 0").value)    # HOME [rad]; raises on bad input
+        self.margin_deg = float(d("limit_margin_deg", 5.0).value)
+        self.limit_follow = bool(d("limit_follow", True).value)
+        self.require_js = bool(d("require_joint_states", False).value)
+        # IK range (soft limits + elbow-up bound) and the range a published command may never leave
+        self.ik_lo, self.ik_hi, self.out_lo, self.out_hi = soft_limits(self.margin_deg)
+        home = np.clip(self.home, self.out_lo, self.out_hi)
+        if not np.allclose(home, self.home):
+            self.get_logger().warn("home_deg is closer than limit_margin_deg to a joint limit; using %s deg instead"
+                                   % np.degrees(home).round(1).tolist())
+            self.home = home
         self.engaged = bool(d("start_engaged", False).value)
         topic = d("command_topic", "/dual_arm/isaac_joint_commands").value
         self.pub_js = bool(d("publish_joint_states", False).value)
@@ -188,6 +209,7 @@ class Teleop(Node):
             raise ValueError(f"joint_names needs 6 comma-separated names, got {len(custom)}: {custom}")
         self.joint_names = custom or [prefix + n for n in JOINT_NAMES]
         js_topic = d("joint_states_topic", "/dual_arm/isaac_joint_states").value
+        self.js_topic = js_topic
 
         self.tf = Buffer()
         self.tf_listener = TransformListener(self.tf, self, spin_thread=True)   # TF never waits for the IK
@@ -266,6 +288,11 @@ class Teleop(Node):
         if self.q_cmd is None:                                     # wait for the measured start pose
             now = self.get_clock().now().nanoseconds * 1e-9
             self.t_start = self.t_start or now
+            if self.q_meas is None and self.require_js:
+                self.get_logger().warn(f"waiting for the measured joints ({self.joint_names[0]}..) on {self.js_topic} - "
+                                       "nothing is published until they arrive (require_joint_states)",
+                                       throttle_duration_sec=3.0)
+                return
             if self.q_meas is None and now - self.t_start < self.home_wait:
                 return
             # start from the measured pose as it is (may be outside the IK bounds, e.g. Isaac's straight-up start with
@@ -288,20 +315,34 @@ class Teleop(Node):
             self.get_logger().info("at HOME - call ~/engage true to start")
         self.publish(self.q_cmd)
 
+    def lookup(self, target, source):
+        """Latest TF target <- source as (4x4, stamp [s], raw (x, y, z, qx, qy, qz, qw)); raises TransformException."""
+        t = self.tf.lookup_transform(target, source, Time())
+        tr, rq = t.transform.translation, t.transform.rotation
+        raw = (tr.x, tr.y, tr.z, rq.x, rq.y, rq.z, rq.w)
+        T = np.eye(4)
+        T[:3, :3], T[:3, 3] = quat_to_matrix(raw[3:]), raw[:3]
+        return T, Time.from_msg(t.header.stamp).nanoseconds * 1e-9, raw
+
     def read_hand(self):
-        """Hand pose in base_frame, or None if missing / stale / frozen."""
+        """Hand pose in base_frame, or None if missing / stale / frozen.
+        Two lookups, joined here: world <- hand (mocap, stamped with this PC's clock) and base <- world (the robot model,
+        stamped by whoever publishes the joint states: Isaac's sim clock). One lookup base <- hand would need a time at
+        which BOTH chains have data, which never exists when the two clocks differ (TF ExtrapolationException)."""
         try:
-            t = self.tf.lookup_transform(self.base_frame, self.hand_frame, Time())
+            if self.world_frame:
+                T_wh, stamp, raw = self.lookup(self.world_frame, self.hand_frame)
+                T_bw = self.lookup(self.base_frame, self.world_frame)[0]   # robot chain: latest, any clock
+                T = T_bw @ T_wh
+            else:
+                T, stamp, raw = self.lookup(self.base_frame, self.hand_frame)
         except TransformException as e:
-            self.why = f"no TF {self.base_frame} <- {self.hand_frame} ({type(e).__name__})"
+            self.why = f"no TF {self.base_frame} <- {self.hand_frame} ({type(e).__name__}: {e})"
             return None
-        stamp = Time.from_msg(t.header.stamp).nanoseconds * 1e-9
         now = self.get_clock().now().nanoseconds * 1e-9
         if now - stamp > self.stale:
             self.why = f"hand pose stale ({now - stamp:.2f} s old)"
             return None
-        tr, rq = t.transform.translation, t.transform.rotation
-        raw = (tr.x, tr.y, tr.z, rq.x, rq.y, rq.z, rq.w)
         if raw == self.last_raw:                           # bit-identical = frozen (marker loss)
             self.frozen_since = self.frozen_since or now
             if now - self.frozen_since > self.stale:
@@ -310,7 +351,7 @@ class Teleop(Node):
         else:
             self.frozen_since = None
         self.last_raw = raw
-        p = np.array(raw[:3])
+        p = T[:3, 3].copy()
         # outlier gate: a jump faster than a hand can move is a marker glitch (swap / ghost) - skip it; if it
         # persists for 0.1 s it is real (e.g. hand moved during a drop-out) and accepted
         if self.good_p is not None:
@@ -321,7 +362,7 @@ class Teleop(Node):
                     self.why = "marker glitch (pose jump) ignored"
                     return "glitch"
         self.good_p, self.good_t, self.glitch_since = p, now, None
-        return p, np.array(raw[3:])
+        return p, matrix_to_quat(T[:3, :3])
 
     # ------------------------------------------------------------------ main loop
     def step(self):
@@ -405,46 +446,48 @@ class Teleop(Node):
             q_rest = self.home.copy()
             q_rest[5] = seed[5]                            # no pull of joint 6 towards HOME: the hand roll owns it
         if self.use_orientation:
-            q_ik, pe, re = ik_priority(T, seed)
+            q_ik, pe, re = ik_priority(T, seed, lower=self.ik_lo, upper=self.ik_hi)
         else:
-            q_ik, pe, re = ik(T, seed, w_rot=0.0, iters=25, q_rest=q_rest)
+            q_ik, pe, re = ik(T, seed, w_rot=0.0, iters=25, q_rest=q_rest, lower=self.ik_lo, upper=self.ik_hi)
         if self.roll_follow and self.roll_axis is not None:
             # joint 6 spins about the tool axis, so it cannot change the tool position: drive it directly from the
             # twist of the hand about that axis (tilts of the hand contribute ~0), continuous across +-180 deg
             twist = twist_about(R_f @ self.hand_ref[1].T, self.roll_axis)
             self.twist_acc += (twist - self.twist_prev + math.pi) % (2 * math.pi) - math.pi
             self.twist_prev = twist
-            q_ik[5] = float(np.clip(self.q6_ref + self.roll_sign * self.scale_rot * self.twist_acc,
-                                    LOWER[5], UPPER[5]))
-        pinned = limits_hit(q_ik)
-        follow = self.use_orientation and self.limit_follow       # keep following: orientation:=true only (this branch)
-        # with keep following the unreachable part is dropped every cycle, so the IK is never far off: 2 mm / 1 deg count
-        pos_blocked = bool(pinned) and pe > (0.002 if follow else self.limit_warn)
+            q_ik[5], self.twist_acc = clamp_roll(self.q6_ref, self.twist_acc, self.roll_sign * self.scale_rot,
+                                                 self.ik_lo[5], self.ik_hi[5])
+        pinned = limits_hit(q_ik, self.ik_lo, self.ik_hi)          # joints at an IK limit (the elbow-up bound counts)
+        # with limit_follow the unreachable part is dropped every cycle, so the IK is never far off: 2 mm / 1 deg count
+        pos_blocked = bool(pinned) and pe > (0.002 if self.limit_follow else self.limit_warn)
         rot_blocked = self.use_orientation and bool(pinned) and re > 1.0   # wrist at a limit: orientation left short
         hits = pinned if (pos_blocked or rot_blocked) else []
         if hits:                                           # a joint limit is what keeps the IK off the target
             self.limit_active = True
+            kind = "soft limit" if self.margin_deg > 0 else "limit"
             what = ", ".join(
-                f"{self.joint_names[i]} at {side} {'elbow-up bound' if (i == 2 and side == 'lower') else 'limit'} "
-                f"{np.degrees(LOWER[i] if side == 'lower' else UPPER[i]):.0f} deg" for i, side in hits)
+                f"{self.joint_names[i]} at {side} "
+                f"{'elbow-up bound' if (i == 2 and side == 'lower' and self.ik_lo[2] == LOWER[2]) else kind} "
+                f"{np.degrees(self.ik_lo[i] if side == 'lower' else self.ik_hi[i]):.0f} deg" for i, side in hits)
             short = f"{pe * 1000:.0f} mm" + (f" / {re:.0f} deg" if self.use_orientation else "")
             tail = ("hand motion beyond it is ignored, the arm follows again as soon as the hand moves another way"
-                    if follow else f"target {short} out of reach, moving to the closest reachable pose")
+                    if self.limit_follow else
+                    f"target {short} out of reach, moving to the closest reachable pose")
             self.get_logger().warn(f"joint limit reached: {what} - {tail}", throttle_duration_sec=1.0)
         else:
-            if self.limit_active and (not pinned if follow else pe <= self.limit_warn):
+            if self.limit_active and (not pinned if self.limit_follow else pe <= self.limit_warn):
                 self.limit_active = False
                 self.get_logger().info("joint limits: target back in range")
             if pe > 0.02:
                 self.get_logger().warn(f"target not reachable ({pe * 1000:.0f} mm off) - moving as close as possible",
                                        throttle_duration_sec=1.0)
-        if follow and self.scale_trans > 0 and (pos_blocked or np.any(np.abs(beyond) > 1e-3)):
+        if self.limit_follow and self.scale_trans > 0 and (pos_blocked or np.any(np.abs(beyond) > 1e-3)):
             # keep following: the hand motion past the limit (or the workspace box) is forgotten, so the target stays at
             # the closest reachable point and the arm follows at once when the hand moves any other way
             reached = fk(q_ik)[:3, 3]
             self.hand_ref = (drop_unreachable(self.hand_ref[0], wanted, reached, self.scale_trans), self.hand_ref[1])
             self.target = reached.copy()
-        if follow and rot_blocked and self.scale_rot > 0:
+        if self.limit_follow and rot_blocked and self.scale_rot > 0:
             # the same for the orientation: the hand rotation past the limit is forgotten, the wrist turns back at once
             R_reached = fk(q_ik)[:3, :3]
             self.hand_ref = (self.hand_ref[0], drop_unreachable_rot(R_f, R_reached, self.robot_ref[:3, :3],
@@ -452,14 +495,19 @@ class Teleop(Node):
             self.cmd_R = R_reached.copy()
         # 6. joint speed limit: scale ALL joints by the same factor so the step keeps the IK's direction and the tool
         # stays on its path (clipping each joint on its own bends the motion when one joint saturates)
-        dq = q_ik - self.q_cmd
-        m = float(np.max(np.abs(dq)))                     # largest joint step this cycle [rad]
         max_step = self.vmax * self.dt
-        if m > max_step:
-            dq *= max_step / m
-        q_next = np.clip(self.q_cmd + dq, LOWER, UPPER)
-        if self.use_orientation:                           # full pose: the lead limit shortens the whole step, too
-            q_next = self.hold_lead_path(self.q_cmd, q_next)
+        if self.roll_follow:
+            # semi: joint 6 only rolls the tool about its own axis (no effect on the position) - limit it on its own, so a
+            # fast hand roll does not slow down the translation done by joints 1-5
+            q_next = np.append(step_toward(self.q_cmd[:5], q_ik[:5], max_step),
+                               self.q_cmd[5] + np.clip(q_ik[5] - self.q_cmd[5], -max_step, max_step))
+        else:
+            q_next = step_toward(self.q_cmd, q_ik, max_step)
+        # never past the soft limits; a joint that already is beyond them (e.g. the measured start pose) may only move
+        # back inside, at the speed limit - no jump
+        lo, hi = np.minimum(self.out_lo, self.q_cmd), np.maximum(self.out_hi, self.q_cmd)
+        q_next = np.clip(q_next, lo, hi)
+        q_next = self.hold_lead_path(self.q_cmd, q_next)  # slow robot: the whole step shortens, the path is kept
         self.q_cmd = self.hold_lead(q_next)                # robot behind: never more than max_lead ahead of it
         self.publish(self.q_cmd)                           # 7.
 

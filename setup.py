@@ -29,6 +29,7 @@ setup(
             "gripper = rebel_demo.gripper_node:main",
             "joint_merger = rebel_demo.joint_merger_node:main",
             "teleop_keyboard = rebel_demo.keyboard_node:main",
+            "rebel_ui = rebel_demo.gui_app:main",
         ],
     },
 )

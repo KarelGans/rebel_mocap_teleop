@@ -21,7 +21,7 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
-from launch_ros.actions import Node, SetParameter
+from launch_ros.actions import Node
 
 
 def movable_joints(urdf):
@@ -47,6 +47,15 @@ def setup(context):
     if removed:      # silently ignoring them would use the default IDs of the wrong hand
         raise RuntimeError(f"{', '.join(removed)} no longer exist: use left_hand_frame / left_gripper_frame (rig:=left or both) "
                            f"and right_hand_frame / right_gripper_frame (rig:=right or both), e.g. left_hand_frame:=1")
+    robot_tf = a("robot_tf")
+    if robot_tf not in ("own", "external"):
+        raise RuntimeError(f"robot_tf:={robot_tf} - use own or external")
+    external = robot_tf == "external"
+    if external and a("target") != "isaac":
+        raise RuntimeError("robot_tf:=external needs target:=isaac (the robot's own stack provides the arm TF)")
+    if external and a("fake_state").lower() == "true":
+        raise RuntimeError("robot_tf:=external and fake_state:=true do not go together: the robot PC already publishes the "
+                           "arm TF; a second model would fight it (TF_OLD_DATA). Drop fake_state:=true.")
     if rig == "both" and a("joint_names"):
         raise RuntimeError("joint_names is for one arm only; rig:=both uses arm_left_/arm_right_ joint1..6")
     if a("orientation").lower() not in ("false", "true", "semi"):
@@ -58,8 +67,7 @@ def setup(context):
                   "lock_gripper_joints": a("lock_gripper")}).toxml()
     # Isaac (dual_arm_rig_ros2_bridge.py) listens on the command topic and publishes the whole rig's joint states.
     command_topic = a("command_topic") or "/dual_arm/isaac_joint_commands"
-    js_topic = "/dual_arm/isaac_joint_states"
-    feedback_topic = a("feedback_topic") or js_topic     # measured joints for teleop (start pose, lead limit)
+    js_topic = a("joint_states_topic") or "/dual_arm/isaac_joint_states"
     sides = ["left", "right"] if rig == "both" else [rig]
     arms = []
     for side in sides:
@@ -71,20 +79,23 @@ def setup(context):
             "finger": frame(a(f"{side}_gripper_frame")),
             "ref": hand,                                       # each gripper measures its fingertip against its own hand
         })
-    # Isaac's bridge stamps joint states with SIM time and publishes /clock; all nodes must use that clock, otherwise
-    # the arm TF (sim time) and the hand TF (PC time) never share a time and teleop holds at HOME. RViz-only: PC time.
+    # Isaac's bridge stamps joint states with SIM time and publishes /clock. Only the nodes that show the Isaac robot use
+    # that clock (robot_state_publisher, RViz). Teleop, gripper, mocap_tf and joint_merger run on this PC's clock: the
+    # hand TF is stamped with it, teleop looks up hand and arm separately (world_frame) so the two clocks never mix, and
+    # their 60 Hz loops keep real time even when Isaac runs slower than real time (on the sim clock everything - joint
+    # speed, tool speed, filter - slowed down with Isaac: the lag). RViz-only: PC time everywhere.
     sim_time = (a("use_sim_time") or ("true" if isaac else "false")).lower() == "true"
     x, y, z = a("robot_xyz").split()
     yaw, pitch, roll = a("robot_ypr").split()
     nodes = [
-        SetParameter(name="use_sim_time", value=sim_time),
         Node(package="tf2_ros", executable="static_transform_publisher", name="map_to_world",
              arguments=["--x", x, "--y", y, "--z", z, "--yaw", yaw, "--pitch", pitch, "--roll", roll,
                         "--frame-id", a("mocap_frame"), "--child-frame-id", "world"]),
-        Node(package="robot_state_publisher", executable="robot_state_publisher",
-             parameters=[{"robot_description": urdf}], output="screen",
-             remappings=[("joint_states", js_topic)]),
     ]
+    if not external:        # robot_tf:=external: the robot PC's robot_state_publisher provides world -> arm frames
+        nodes.append(Node(package="robot_state_publisher", executable="robot_state_publisher",
+                          parameters=[{"robot_description": urdf, "use_sim_time": sim_time}], output="screen",
+                          remappings=[("joint_states", js_topic)]))
     # Every arm / gripper publishes on its own topic and joint_merger sends ONE combined message per cycle (Isaac's
     # Subscribe Joint State keeps only the latest message, so separate messages would take turns).
     merge_inputs = []
@@ -96,7 +107,9 @@ def setup(context):
                               "base_frame": arm["base_frame"],
                               "joint_prefix": arm["prefix"],
                               "joint_names": a("joint_names"),
-                              "joint_states_topic": feedback_topic,
+                              # the robot's own measured joints (start pose), separate from the rig-model topic below
+                              "joint_states_topic": a("robot_joint_states_topic") or a("feedback_topic") or js_topic,
+                              "require_joint_states": a("require_joint_states").lower() == "true",
                               "hand_frame": arm["hand"],
                               "scale_trans": float(a("scale_trans") or a("scale") or "1.0"),
                               "scale_rot": float(a("scale_rot")),
@@ -111,7 +124,9 @@ def setup(context):
                               "cutoff_hz": float(a("cutoff_hz")),
                               "max_joint_speed_deg": float(a("max_joint_speed_deg")),
                               "max_lead_deg": float(a("max_lead_deg")),
+                              "stale_timeout": float(a("stale_timeout")),
                               "skip_home": a("skip_home").lower() == "true",
+                              "limit_margin_deg": float(a("limit_margin_deg")),
                               "home_deg": a("home_deg"),
                               "limit_warn_mm": float(a("limit_warn_mm")),
                               "workspace_min": [float(v) for v in a("workspace_min").split()],
@@ -130,6 +145,7 @@ def setup(context):
                                   "close_angle_deg": float(a("gripper_close_angle")),
                                   "threshold": float(a("gripper_threshold")),
                                   "hysteresis": float(a("gripper_hysteresis")),
+                                  "stale_timeout": float(a("stale_timeout")),
                                   "invert": a("gripper_invert").lower() == "true",
                                   "joint_prefix": arm["grip_prefix"],
                                   "command_topic": grip_out,
@@ -152,7 +168,7 @@ def setup(context):
     if a("mocap_bridge").lower() == "true":     # mocap4r2 driver publishes /rigid_bodies only, no TF
         nodes.append(Node(package="rebel_demo", executable="mocap_tf", output="screen"))
     if a("rviz").lower() == "true":
-        nodes.append(Node(package="rviz2", executable="rviz2", output="screen",
+        nodes.append(Node(package="rviz2", executable="rviz2", output="screen", parameters=[{"use_sim_time": sim_time}],
                           arguments=["-d", os.path.join(share, "rviz", "rebel_demo.rviz")]))
     return nodes
 
@@ -182,24 +198,38 @@ def generate_launch_description():
           description="orientation:=true: anti-windup - command at most this far ahead of the commanded joints' pose [m]"),
         D("max_tool_lead_deg", default_value="15",
           description="orientation:=true: anti-windup - the same for the rotation [deg]"),
-        D("limit_follow", default_value="true",
-          description="orientation:=true: at a joint limit forget the hand motion the arm cannot follow (false: wait "
-                      "until the hand is back where the arm stopped)"),
         D("cutoff_hz", default_value="4.0", description="low-pass cutoff on the hand pose"),
         D("max_joint_speed_deg", default_value="45.0",
           description="per-joint speed limit of the command [deg/s]; real robot: below the follower's speed, e.g. 15"),
         D("max_lead_deg", default_value="0",
           description="command never more than this ahead of the measured joints [deg], 0 = off; real robot: below "
                       "the follower's catch-up threshold, e.g. 20"),
-        D("feedback_topic", default_value="",
-          description="measured joints for the start pose and the lead limit; '' = /dual_arm/isaac_joint_states; "
-                      "real robot: /joint_states"),
+        D("feedback_topic", default_value="", description="old name of robot_joint_states_topic"),
+        D("stale_timeout", default_value="0.2",
+          description="s without a new hand pose before teleop / gripper hold; raise it (e.g. 0.5) when the mocap network "
+                      "delivers frames late or in bursts (driver log: 'Optitrack system latency >100 ms')"),
+        D("robot_tf", default_value="own",
+          description="own = start our robot_state_publisher (rig model) | external = the robot PC publishes the arm TF "
+                      "(world -> arm_*_base_link) on this ROS domain: do not start a second model"),
+        D("joint_states_topic", default_value="",
+          description="measured joints for the start pose (and our robot_state_publisher); '' = /dual_arm/isaac_joint_states"),
         D("fake_state", default_value="false",
           description="target:=isaac only: publish the rig joint states from the commands (when no Isaac / robot does)"),
         D("home_deg", default_value="0 0 60 0 50 0",
           description="start pose of every arm, 6 joint angles [deg] (e.g. \"0 0 100 0 50 0\"); the arm moves there at start"),
         D("skip_home", default_value="false",
           description="true = do not move to HOME at start (robot already there); engage right away"),
+        D("limit_margin_deg", default_value="5",
+          description="never publish a joint closer than this [deg] to its limit; must be larger than the real robot's "
+                      "follower margin (2.9 deg) so it never clamps what we send (0 = full range)"),
+        D("limit_follow", default_value="true",
+          description="at a joint limit, forget the hand motion the arm cannot follow: it follows at once when the hand moves "
+                      "another way (false: the hand must come back to where the arm stopped)"),
+        D("robot_joint_states_topic", default_value="",
+          description="the robot's measured joints for teleop's start pose and the max_lead_deg lead limit (real robot: "
+                      "/joint_states, names arm_left_joint1..6 / arm_right_joint1..6); '' = joint_states_topic"),
+        D("require_joint_states", default_value="false",
+          description="true = publish nothing until the measured joints arrive (never assume an all-zero start pose)"),
         D("limit_warn_mm", default_value="5", description="warn 'joint limit reached' when the IK is this far [mm] off the target"),
         D("workspace_min", default_value="-0.7 -0.7 -0.45", description="IK target clamp min x y z in the arm base frame [m]"),
         D("workspace_max", default_value="0.7 0.7 0.95",
@@ -226,7 +256,8 @@ def generate_launch_description():
         D("joint_names", default_value="",
           description="6 comma-separated arm joint names (base to wrist) sent to Isaac; '' = arm_<side>_joint1..6"),
         D("use_sim_time", default_value="",
-          description="'' = auto (true with target:=isaac, Isaac publishes /clock) | true | false"),
+          description="clock of robot_state_publisher and RViz only (teleop, gripper, mocap_tf, merger always use this PC's "
+                      "clock): '' = auto (true with target:=isaac, Isaac publishes /clock) | true | false"),
         D("command_topic", default_value="",
           description="'' = /dual_arm/isaac_joint_commands (must match Isaac's Subscribe Joint State node)"),
         OpaqueFunction(function=setup),
