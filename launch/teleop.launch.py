@@ -127,6 +127,8 @@ def setup(context):
                               "stale_timeout": float(a("stale_timeout")),
                               "skip_home": a("skip_home").lower() == "true",
                               "limit_margin_deg": float(a("limit_margin_deg")),
+                              "limit_return_speed": float(a("limit_return_speed")),
+                              "markers_detail": a("markers_detail").lower() == "true",
                               "home_deg": a("home_deg"),
                               "limit_warn_mm": float(a("limit_warn_mm")),
                               "workspace_min": [float(v) for v in a("workspace_min").split()],
@@ -222,9 +224,12 @@ def generate_launch_description():
         D("limit_margin_deg", default_value="5",
           description="never publish a joint closer than this [deg] to its limit; must be larger than the real robot's "
                       "follower margin (2.9 deg) so it never clamps what we send (0 = full range)"),
-        D("limit_follow", default_value="true",
-          description="at a joint limit, forget the hand motion the arm cannot follow: it follows at once when the hand moves "
-                      "another way (false: the hand must come back to where the arm stopped)"),
+        D("limit_follow", default_value="false",
+          description="true = at a joint limit, forget the hand motion the arm cannot follow, so pulling back moves the arm "
+                      "at once; the forgotten part fades out at limit_return_speed but swings the arm past its start first "
+                      "(13-22 cm after a quick flick). false = the arm only ever goes where the hand puts it"),
+        D("limit_return_speed", default_value="0.2",
+          description="limit_follow: m/s at which the forgotten hand motion fades back out (0 = keep the offset)"),
         D("robot_joint_states_topic", default_value="",
           description="the robot's measured joints for teleop's start pose and the max_lead_deg lead limit (real robot: "
                       "/joint_states, names arm_left_joint1..6 / arm_right_joint1..6); '' = joint_states_topic"),
@@ -235,6 +240,8 @@ def generate_launch_description():
         D("workspace_max", default_value="0.7 0.7 0.95",
           description="IK target clamp max x y z [m]; the box is widened to include the pose at engage"),
         D("rviz", default_value="true"),
+        D("markers_detail", default_value="false",
+          description="RViz: besides hand (green) and robot (white), show the IK target (blue) and the command (orange)"),
         D("mesh_lod", default_value="low", description="low (decimated meshes, light RViz) | full (CAD)"),
         D("lock_gripper", default_value="false", description="true = XEG joints fixed in the model"),
         D("gripper", default_value="true", description="control the XEG-32 with a second rigid body"),

@@ -51,11 +51,14 @@ Parameters (defaults in brackets)
   limit_margin_deg [5]    never publish a joint closer than this to its limit (joints 1/4/6 stop at +-174 deg, joints 2/3
                           at -74..134, joint 5 at +-89): the robot PC's mocap follower clamps 2.9 deg inside the limits, so
                           everything we send stays followable. The IK uses the same range. 0 = use the full range
-  limit_follow [true]     at a joint limit (or the workspace box), forget the hand motion / rotation the arm cannot
-                          follow: the arm waits at the limit and follows at once when the hand moves any other way. The
-                          forgotten part stays forgotten, like a clutch re-grab: after pushing 2 cm past a limit and coming
-                          back, the tool ends 2 cm from where it started (false: no offset, but the hand has to come all
-                          the way back to where the arm stopped before it moves again, as robot_remote does)
+  limit_follow [false]    true = at a joint limit (or the workspace box), forget the hand motion / rotation the arm
+                          cannot follow, so pulling back moves the arm at once (0.17 s instead of 1.5 s). The forgotten
+                          part makes the arm swing past its start when the hand comes back (13-22 cm after a quick flick
+                          in replays), so it is off by default: the arm then never goes where the hand did not put it,
+                          and sliding along a limit still follows at once (the IK takes the closest reachable pose)
+  limit_return_speed [0.2]  limit_return_deg [60]   with limit_follow: m/s and deg/s at which the forgotten part fades
+                          back out whenever the hand is not pushing further past the limit, so the arm ends where the
+                          hand is (0 = keep it: up to 35 cm off in replays)
   limit_warn_mm [5]       warn "joint limit reached" when the IK is further than this from the target and a joint
                           sits at a limit (the elbow-up bound counts); also warns when the workspace box clamps the target
   reanchor_after [2.0]    s of lost tracking before the clutch re-anchors (shorter gaps: hold, keep the anchor)
@@ -84,7 +87,7 @@ import math
 
 import numpy as np
 import rclpy
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import Point, PoseStamped
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.time import Time
@@ -92,8 +95,9 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool
 from std_srvs.srv import SetBool, Trigger
 from tf2_ros import Buffer, TransformException, TransformListener
+from visualization_msgs.msg import Marker, MarkerArray
 
-from .kinematics import (JOINT_NAMES, LOWER, clamp_roll, drop_unreachable, drop_unreachable_rot, fk, flip_rotation, ik,
+from .kinematics import (JOINT_NAMES, LOWER, _log_so3, clamp_roll, drop_unreachable, drop_unreachable_rot, fk, flip_rotation, ik,
                          ik_priority, lead_step, limit_lead, limits_hit, parse_pose_deg, quat_to_matrix, scale_into_lead,
                          scale_rotation, soft_limits, step_toward, toward_point, toward_rot, twist_about)
 
@@ -191,7 +195,13 @@ class Teleop(Node):
         self.fb_timeout = float(d("feedback_timeout", 0.5).value)
         self.home = parse_pose_deg(d("home_deg", "0 0 60 0 50 0").value)    # HOME [rad]; raises on bad input
         self.margin_deg = float(d("limit_margin_deg", 5.0).value)
-        self.limit_follow = bool(d("limit_follow", True).value)
+        self.limit_follow = bool(d("limit_follow", False).value)
+        # limit_follow: the hand motion dropped at a limit fades back out at this speed once the arm is clear of its
+        # limits again, so a quick flick past a limit does not leave the arm offset from the hand for good
+        self.return_speed = float(d("limit_return_speed", 0.2).value)               # m/s (tool), 0 = keep the offset
+        self.return_rot = math.radians(float(d("limit_return_deg", 60.0).value))    # deg/s (tool rotation)
+        self.markers = bool(d("markers", True).value)                    # RViz ~/markers: hand vs robot
+        self.markers_detail = bool(d("markers_detail", False).value)     # + IK target and command spheres
         self.require_js = bool(d("require_joint_states", False).value)
         # IK range (soft limits + elbow-up bound) and the range a published command may never leave
         self.ik_lo, self.ik_hi, self.out_lo, self.out_hi = soft_limits(self.margin_deg)
@@ -217,6 +227,8 @@ class Teleop(Node):
         self.pub_cmd = self.create_publisher(JointState, topic, 10)
         self.pub_state = self.create_publisher(JointState, "/joint_states", 10) if self.pub_js else None
         self.pub_target = self.create_publisher(PoseStamped, "~/target", 10)
+        self.pub_markers = self.create_publisher(MarkerArray, "~/markers", 10) if self.markers else None
+        self.hand_point = self.target_vis = None
         if not self.pub_js:                                # measured joints: start pose, optional IK seed
             self.create_subscription(JointState, js_topic, self.on_js, 10)
         self.create_service(SetBool, "~/engage", self.on_engage)
@@ -236,7 +248,9 @@ class Teleop(Node):
         self.last_raw = None
         self.frozen_since = None
         self.why = ""
-        self.hand_ref = None               # (p, R) of the hand at engage
+        self.hand_ref = None               # (p, R) of the hand at engage (shifted by limit_follow)
+        self.anchor0 = None                # (p, R) of the hand at engage, never shifted: where the hand really maps
+        self.trail_hand, self.trail_arm, self.n_cycle = [], [], 0
         self.robot_ref = None              # flange pose at engage
         self.dt = 1.0 / self.rate
         self.create_timer(self.dt, self.step)
@@ -398,6 +412,8 @@ class Teleop(Node):
         # 4. mapping
         if self.hand_ref is None:                          # anchor: hand now <-> robot now
             self.hand_ref = (p_f.copy(), R_f.copy())
+            self.anchor0 = (p_f.copy(), R_f.copy())
+            self.trail_hand, self.trail_arm = [], []
             self.robot_ref = fk(self.q_cmd)
             self.cmd_R = self.robot_ref[:3, :3].copy()
             self.roll_axis = self.robot_ref[:3, 2].copy()          # tool0 z = joint6 axis, base frame
@@ -482,6 +498,8 @@ class Teleop(Node):
             if pe > 0.02:
                 self.get_logger().warn(f"target not reachable ({pe * 1000:.0f} mm off) - moving as close as possible",
                                        throttle_duration_sec=1.0)
+        off_p = float(np.linalg.norm(self.hand_ref[0] - self.anchor0[0]))            # dropped so far (hand space)
+        off_r = float(np.linalg.norm(_log_so3(self.hand_ref[1] @ self.anchor0[1].T)))
         if self.limit_follow and self.scale_trans > 0 and (pos_blocked or np.any(np.abs(beyond) > 1e-3)):
             # keep following: the hand motion past the limit (or the workspace box) is forgotten, so the target stays at
             # the closest reachable point and the arm follows at once when the hand moves any other way
@@ -494,6 +512,20 @@ class Teleop(Node):
             self.hand_ref = (self.hand_ref[0], drop_unreachable_rot(R_f, R_reached, self.robot_ref[:3, :3],
                                                                     self.scale_rot, self.rot_signs))
             self.cmd_R = R_reached.copy()
+        if self.limit_follow:
+            # let the dropped hand motion fade back out (anchor -> the engage anchor) whenever the hand is not pushing
+            # further past the limit this cycle, so the arm ends where the hand really is. Without it a flick past a
+            # limit and back left the arm offset by the dropped part (17 cm in a replay; 33 cm when the offset itself
+            # carried the arm into the opposite limit, where a "fade only when no joint is at a limit" rule never ran)
+            if (self.return_speed > 0 and self.scale_trans > 0
+                    and float(np.linalg.norm(self.hand_ref[0] - self.anchor0[0])) <= off_p + 1e-9):
+                self.hand_ref = (toward_point(self.hand_ref[0], self.anchor0[0],
+                                              self.return_speed * self.dt / self.scale_trans), self.hand_ref[1])
+            if (self.use_orientation and self.return_rot > 0 and self.scale_rot > 0
+                    and float(np.linalg.norm(_log_so3(self.hand_ref[1] @ self.anchor0[1].T))) <= off_r + 1e-9):
+                self.hand_ref = (self.hand_ref[0], toward_rot(self.hand_ref[1], self.anchor0[1],
+                                                              self.return_rot * self.dt / self.scale_rot))
+        self.hand_point = self.robot_ref[:3, 3] + self.scale_trans * (p_f - self.anchor0[0])   # where the hand maps
         # 6. joint speed limit: scale ALL joints by the same factor so the step keeps the IK's direction and the tool
         # stays on its path (clipping each joint on its own bends the motion when one joint saturates)
         max_step = self.vmax * self.dt
@@ -557,6 +589,82 @@ class Teleop(Node):
                 f"(joint {i + 1} lags {math.degrees(lag[i]):.0f} deg)", throttle_duration_sec=2.0)
         return out
 
+    def publish_markers(self):
+        """RViz (~/markers, base_frame), 20 Hz. Default: green "hand" = where your hand maps (no limits), white "robot" =
+        the real arm's tool point (the command when no fresh joint states), a yellow line between them with the distance
+        (how far the robot is behind your hand), both with 2 s trails, and the arm's state above it.
+        markers_detail:=true adds small spheres for the IK target after all limits (blue) and the command (orange)."""
+        self.n_cycle += 1
+        if self.pub_markers is None or self.n_cycle % max(1, round(self.rate / 20)):
+            return
+        stamp = self.get_clock().now().to_msg()
+        out = MarkerArray()
+
+        def mk(mid, kind, rgba, size):
+            m = Marker()
+            m.header.frame_id, m.header.stamp, m.ns, m.id, m.type = self.base_frame, stamp, "teleop", mid, kind
+            m.action = Marker.ADD
+            m.pose.orientation.w = 1.0
+            m.scale.x = m.scale.y = m.scale.z = size
+            m.color.r, m.color.g, m.color.b, m.color.a = rgba
+            out.markers.append(m)
+            return m
+
+        def pt(p):
+            return Point(x=float(p[0]), y=float(p[1]), z=float(p[2]))
+
+        def sphere(mid, p, rgba, size):
+            m = mk(mid, Marker.SPHERE, rgba, size)
+            if p is None:
+                m.action = Marker.DELETE
+            else:
+                m.pose.position = pt(p)
+
+        def line(mid, pts, rgba, width):
+            m = mk(mid, Marker.LINE_STRIP, rgba, width)
+            m.points = [pt(p) for p in pts]
+            if len(pts) < 2:
+                m.action = Marker.DELETE
+
+        def text(mid, p, words, rgba, size):
+            m = mk(mid, Marker.TEXT_VIEW_FACING, rgba, size)
+            if p is None or not words:
+                m.action = Marker.DELETE
+            else:
+                m.pose.position, m.text = pt(p), words
+
+        green, white, yellow = (0.1, 0.9, 0.2, 0.95), (1.0, 1.0, 1.0, 0.95), (1.0, 0.85, 0.1, 0.9)
+        engaged = self.engaged and self.hand_ref is not None and self.hand_point is not None
+        hand = self.hand_point if engaged else None
+        cmd = fk(self.q_cmd)[:3, 3] if self.q_cmd is not None else None
+        age = self.feedback_age()
+        measured = self.q_meas is not None and age is not None and age < 1.0
+        robot = fk(self.q_meas)[:3, 3] if measured else cmd
+        n = 40                                                     # 2 s of trail at 20 Hz
+        self.trail_hand = (self.trail_hand + [hand])[-n:] if hand is not None else []
+        if robot is not None:
+            self.trail_arm = (self.trail_arm + [robot])[-n:]
+        up = np.array([0.0, 0.0, 0.05])
+        sphere(0, hand, green, 0.04)
+        line(1, self.trail_hand, (0.1, 0.9, 0.2, 0.5), 0.005)
+        text(2, None if hand is None else hand + up, "hand", green, 0.035)
+        sphere(3, robot, white, 0.04)
+        line(4, self.trail_arm, (1.0, 1.0, 1.0, 0.4), 0.005)
+        text(5, None if robot is None else robot - up, "robot" if measured else "robot (command)", white, 0.035)
+        gap = None if (hand is None or robot is None) else float(np.linalg.norm(hand - robot))
+        apart = gap is not None and gap >= 0.01
+        line(6, [robot, hand] if apart else [], yellow, 0.004)
+        text(7, (robot + hand) / 2 + up / 2 if apart else None, f"{gap * 100:.0f} cm" if apart else "", yellow, 0.03)
+        state = "HOMING" if self.homing else ("RUNNING" if self.engaged else "PAUSED")
+        if self.limit_active:
+            state += " - at a joint limit"
+        side = self.joint_names[0].replace("joint1", "").replace("arm_", "").strip("_")
+        text(8, None if robot is None else robot + np.array([0.0, 0.0, 0.2]),
+             f"{side + ' arm' if side else 'arm'}: {state}", (1.0, 1.0, 1.0, 1.0), 0.04)
+        sphere(9, self.target_vis if (engaged and self.markers_detail) else None, (0.2, 0.4, 1.0, 0.9), 0.02)
+        sphere(10, cmd if self.markers_detail else None, (1.0, 0.55, 0.0, 0.9), 0.02)
+        self.pub_markers.publish(out)
+
     def publish(self, q):
         msg = JointState()
         msg.header.stamp = self.get_clock().now().to_msg()
@@ -565,6 +673,7 @@ class Teleop(Node):
         self.pub_cmd.publish(msg)
         if self.pub_state is not None:
             self.pub_state.publish(msg)
+        self.publish_markers()
 
     def publish_target(self, T):
         m = PoseStamped()
@@ -575,6 +684,7 @@ class Teleop(Node):
         m.pose.orientation.x, m.pose.orientation.y, m.pose.orientation.z, m.pose.orientation.w = (
             float(qx), float(qy), float(qz), float(qw))
         self.pub_target.publish(m)
+        self.target_vis = T[:3, 3].copy()
 
 
 def main():

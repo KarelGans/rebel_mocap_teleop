@@ -29,14 +29,34 @@ Visualization Manager:
       Enabled: false
       Value: false
     - Class: rviz_default_plugins/MarkerArray
-      Name: DemoPath
+      Name: Teleop left (green = hand, white = robot, yellow = how far behind)
       Enabled: true
       Topic:
         Depth: 5
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /demo_markers
+        Value: /rebel_teleop_left/markers
+      Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Teleop right
+      Enabled: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /rebel_teleop_right/markers
+      Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Teleop (rig:=left / right)
+      Enabled: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /rebel_teleop/markers
       Value: true
   Enabled: true
   Global Options:

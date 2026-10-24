@@ -354,6 +354,49 @@ def test_keep_following_after_a_limit():
     assert _replay(follow=True) < 0.25                 # new: comes back at once (the rest is the joint speed limit)
 
 
+def _limit_follow_replay(hand_of_t, seconds, return_speed):
+    """teleop's position cycle with limit_follow on (tool rate limit, workspace box, drop at a limit, and the fade of the
+    dropped part whenever it did not grow this cycle). Returns the tool positions relative to the start [m]."""
+    from rebel_demo.kinematics import toward_point
+    dt, vmax = 1 / 60, math.radians(45)
+    ik_lo, ik_hi, out_lo, out_hi = soft_limits(5.0)
+    ws_lo, ws_hi = np.array([-0.7, -0.7, -0.45]), np.array([0.7, 0.7, 0.95])
+    q_cmd = np.radians([0, 0, 60, 0, 50, 0])
+    ref = fk(q_cmd)
+    robot_ref, anchor0 = ref[:3, 3].copy(), np.zeros(3)
+    hand_ref, target, tool = anchor0.copy(), robot_ref.copy(), []
+    for k in range(int(seconds / dt)):
+        wanted = robot_ref + (hand_of_t(k * dt) - hand_ref)
+        T = ref.copy()
+        target = toward_point(target, np.clip(wanted, ws_lo, ws_hi), 0.5 * dt)
+        T[:3, 3] = target
+        q_ik, pe, _ = ik(T, q_cmd, w_rot=0.0, iters=25, q_rest=np.radians([0, 0, 60, 0, 50, 0]), lower=ik_lo, upper=ik_hi)
+        before = float(np.linalg.norm(hand_ref - anchor0))
+        if (limits_hit(q_ik, ik_lo, ik_hi) and pe > 0.002) or np.any(np.abs(wanted - np.clip(wanted, ws_lo, ws_hi)) > 1e-3):
+            reached = fk(q_ik)[:3, 3]
+            hand_ref, target = drop_unreachable(hand_ref, wanted, reached, 1.0), reached.copy()
+        if return_speed > 0 and float(np.linalg.norm(hand_ref - anchor0)) <= before + 1e-9:
+            hand_ref = toward_point(hand_ref, anchor0, return_speed * dt)
+        dq = q_ik - q_cmd
+        m = float(np.max(np.abs(dq)))
+        q_cmd = np.clip(q_cmd + (dq * (vmax * dt / m) if m > vmax * dt else dq),
+                        np.minimum(out_lo, q_cmd), np.maximum(out_hi, q_cmd))
+        tool.append(fk(q_cmd)[:3, 3] - robot_ref)
+    return np.array(tool)
+
+
+def test_limit_follow_offset_fades_back():
+    """limit_follow: the hand motion dropped at a limit fades back out (limit_return_speed), so the arm ends where the
+    hand is. Without the fade a quick flick past the reach and back left it far off, and pushing 80 cm past the reach and
+    back left it 33 cm off (the offset carried the arm into the opposite limit, where it stayed)."""
+    flick = lambda t: np.array([0.6 * (min(t, 0.25) - max(0.0, min(t, 0.5) - 0.25)) / 0.25, 0.0, 0.0])  # noqa: E731
+    push = lambda t: np.array([0.4 * min(t, 2.0) - 0.4 * min(max(0.0, t - 2.0), 2.0), 0.0, 0.0])         # noqa: E731
+    assert np.linalg.norm(_limit_follow_replay(flick, 8.0, 0.0)[-1]) > 0.05
+    assert np.linalg.norm(_limit_follow_replay(push, 9.0, 0.0)[-1]) > 0.2
+    assert np.linalg.norm(_limit_follow_replay(flick, 8.0, 0.2)[-1]) < 0.01
+    assert np.linalg.norm(_limit_follow_replay(push, 9.0, 0.2)[-1]) < 0.01
+
+
 # ---------------------------------------------------------------- orientation:=true: robot_remote's method
 from rebel_demo.kinematics import (_log_so3, drop_unreachable_rot, flip_rotation, ik_priority, step_toward,  # noqa: E402
                                    toward_point, toward_rot)
@@ -484,3 +527,32 @@ def test_scale_into_lead_keeps_the_step_direction():
     assert np.allclose(scale_into_lead(far, far + 0.01, q_meas, lead), far)
     assert np.allclose(scale_into_lead(far, far - 0.01, q_meas, lead), far - 0.01)
     assert np.allclose(scale_into_lead(q_prev, q_new, None, lead), q_new)            # no feedback: unchanged
+
+
+def test_markers_in_every_state():
+    """The RViz markers are drawn from every state of the node (start, homing, paused, running, at a limit, with and
+    without measured joints) without crashing: a None distance once killed teleop as soon as it reached HOME."""
+    rclpy = pytest.importorskip("rclpy")
+    from rebel_demo.teleop_node import Teleop
+    rclpy.init()
+    node = Teleop()
+    try:
+        def draw():
+            node.n_cycle = 2                                  # the next call passes the 20 Hz throttle
+            node.publish_markers()
+        draw()                                                # nothing known yet
+        node.q_cmd = node.home.copy()
+        draw()                                                # homing, no measured joints
+        node.homing = False
+        node.q_meas, node.t_meas = node.home.copy(), node.get_clock().now().nanoseconds * 1e-9
+        draw()                                                # paused at HOME, measured joints fresh
+        node.engaged, node.hand_ref = True, (np.zeros(3), np.eye(3))
+        node.hand_point = fk(node.home)[:3, 3] + np.array([0.0, 0.2, 0.0])
+        node.target_vis, node.limit_active = node.hand_point.copy(), True
+        draw()                                                # running, hand 20 cm away, at a limit
+        node.hand_point = fk(node.home)[:3, 3].copy()
+        node.markers_detail = True
+        draw()                                                # running, hand on the robot, detail spheres on
+    finally:
+        node.destroy_node()
+        rclpy.try_shutdown()
