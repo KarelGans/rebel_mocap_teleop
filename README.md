@@ -137,6 +137,22 @@ ros2 lifecycle set /mocap4r2_optitrack_driver_node activate              #      
 ros2 topic hz /rigid_bodies                                              # ~120 Hz
 ```
 
+### Commands we use on the real robot
+`run.sh` defaults to `ROS_DOMAIN_ID=12`. Set `R` in every new terminal (or once in `~/.bashrc`):
+```bash
+R=~/dual_arm_control/src/rebel_mocap_teleop/scripts/run.sh
+
+$R driver                                              # terminal 1: OptiTrack driver, wait for "Configured!"
+$R activate                                            # terminal 2 (start only ONE driver)
+$R real rig:=left                                      # terminal 3: left arm, orientation:=true (rot_axis_sign "1 1 1")
+$R real rig:=left orientation:=semi roll_sign:=1       #   or: semi (joint 6 follows the twist, roll_sign 1)
+$R keyboard -p teleop:=/rebel_teleop                   # terminal 4: SPACE = engage / pause (rig:=left)
+$R calibrate                                           # once, hand open
+```
+Robot PC first: arm drivers + mocap follower running, follower enabled (`e`). Teleop waits for the robot's
+`/joint_states`, then moves to HOME; `robot is behind: ...` means the real arm is not following (follower disabled).
+Follower status: `ros2 topic echo /mocap_follower/status --once --full-length`.
+
 ### 2.2 Real robot
 Teleop publishes the commands; on the robot PC the **mocap follower** (`mocap_follower_left` / `_right` with MoveIt Servo)
 subscribes to `/dual_arm/isaac_joint_commands` and drives the arms ([interface](#11-real-robot-interface)). Without Isaac there
