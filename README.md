@@ -305,7 +305,7 @@ One window instead of the driver, teleop, keyboard and calibrate terminals (need
 | robot_joint_states_topic | (`joint_states_topic`) | the robot's measured joints for the start pose and the lead limit. Real robot: `/joint_states`. `feedback_topic` is an old name for it |
 | max_lead_deg | 0 (off) | the command is never more than this many degrees ahead of the measured joints (per joint), and homing waits for the robot. Real robot: below the follower's catch-up threshold (0.5 rad = 29 deg), e.g. 20. So the deadman can be pressed at any time: with it released the arm stands still and the command waits 20 deg from it, so pressing it finds at most 0.35 rad error (no REFUSED, no catch-up). Measured joints missing or older than `feedback_timeout` (0.5 s): the command **holds** until they return, then moves back within the limit at the joint speed limit (never one big step) |
 | workspace_min, workspace_max | `-0.7 -0.7 -0.45`, `0.7 0.7 0.95` | clamp of the tool target in the arm base frame (m), widened to include the pose at engage |
-| limit_margin_deg | 5 | never publish a joint closer than this (deg) to its limit: joints 1/4/6 stay within +-174, joints 2 and 3 within -74..134 (joint 3 also keeps its 15 deg elbow bound in the IK), joint 5 within +-89. Keep it above 3: the robot's follower clamps 2.9 deg inside the limits. The IK uses the same range; `0` = the full range |
+| limit_margin_deg | 5 | never publish a joint closer than this (deg) to its limit: joints 1/4/6 stay within +-173, joints 2 and 3 within -74..134 (joint 3 also keeps its 15 deg elbow bound in the IK), joint 5 within +-89. Keep it above 3: the robot's follower clamps 2.9 deg inside the limits. The IK uses the same range; `0` = the full range |
 | limit_follow | false | `true`: at a joint limit (or the workspace box), forget the hand motion / rotation the arm cannot follow, so pulling back moves the arm at once (0.17 s instead of 1.5 s). The forgotten part swings the arm past its start when the hand comes back (13-22 cm after a quick flick in replays) before it fades out at `limit_return_speed`, so it is off by default; with `false` the arm only ever goes where your hand puts it, and sliding along a limit still follows at once |
 | limit_return_speed | 0.2 | with `limit_follow`: m/s at which the forgotten hand motion fades back out whenever the hand is not pushing further past the limit, so the arm ends where the hand is (`0` keeps it: up to 35 cm off in replays); rotation: node parameter `limit_return_deg` (60) |
 | limit_warn_mm | 5 | with `limit_follow:=false`: warn `joint limit reached` when the IK is this far (mm) off the target with a joint at a limit (with `limit_follow` the warning comes as soon as a limit holds the arm back) |
@@ -352,7 +352,7 @@ Node-only parameters (set with `--ros-args -p`): teleop `rate_hz` 60,
 | `orientation` | What the IK is asked for | Joint 6 / wrist |
 |---|---|---|
 | `false` (stable default) | tool **position** only (3 equations, 6 joints); orientation is ignored (not locked: it drifts with joints 1-3) | wrist only pulled gently back to `home_deg`; joint 6 never moves (its axis passes through the tool point, so it cannot change the position) |
-| `semi` | same as `false` for joints 1-5 | joint 6 = its angle at engage + `roll_sign` x `scale_rot` x your hand's twist about the tool axis (measured since engage, continuous past 180 deg, limited to +-179 deg and the speed limit). Tilting the hand adds ~0 |
+| `semi` | same as `false` for joints 1-5 | joint 6 = its angle at engage + `roll_sign` x `scale_rot` x your hand's twist about the tool axis (measured since engage, continuous past 180 deg, limited to +-173 deg and the speed limit). Tilting the hand adds ~0 |
 | `true` | position **and** rotation, with [robot_remote](https://github.com/Patrick-zhuyanxun/robot_remote)'s method (below) | the wrist follows the hand; at a wrist limit the rotation stops there. Near the straight-up pose (joint 5 about 0) joints 4 and 6 share an axis: start with a bent wrist (e.g. `home_deg:="0 0 60 0 50 0"`) |
 
 `semi` measures the twist about the tool axis **at engage**, expressed in the robot base frame; with the tool vertical this
@@ -442,13 +442,15 @@ tools/lag_probe.py             real arm vs our commands: lag, tracking error, fo
 The launch expands `igus_rebel_description/urdf/dual_arm_rig_v2.urdf.xacro`, the same model the Isaac rig uses: a lift, two
 sliders and two rebel2 arms (`arm_left_joint1..6`, `arm_right_joint1..6`), each with an XEG-32
 (`arm_<side>_xeg32_left/right_carriage_joint`, the right jaw mimics the left). The IK targets `tool0` (link 6 + 52.7 mm)
-relative to `arm_<side>_base_link`. The limits in `kinematics.py` are the **real ReBeL's**, as used by the robot PC's mocap
-follower (the Isaac rig model allows 1 deg more on joints 2, 3 and 5); teleop publishes `limit_margin_deg` (5 deg) inside them:
+relative to `arm_<side>_base_link`. The limits in `kinematics.py` are the **real ReBeL's**: the robot's URDF / controller
+(fani8j/Igus_rebel, branch `box-seam-detection`; `tools/cri_query_limits.py` there reads them from the controller), as used by
+the robot PC's mocap follower. The Isaac rig model allows 1 deg more on every joint. Teleop publishes `limit_margin_deg` (5 deg)
+inside them:
 
 | joint | 1 | 2 | 3 | 4 | 5 | 6 |
 |---|---|---|---|---|---|---|
-| limit (deg) | +-179 | -79..139 | -79..139 (IK keeps >= 15) | +-179 | +-94 | +-179 |
-| published (deg) | +-174 | -74..134 | 15..134 | +-174 | +-89 | +-174 |
+| limit (deg) | +-178 | -79..139 | -79..139 (IK keeps >= 15) | +-178 | +-94 | +-178 |
+| published (deg) | +-173 | -74..134 | 15..134 | +-173 | +-89 | +-173 |
 
 Speed 45 deg/s (the robot's follower: 0.3 rad/s). The 15 deg elbow bound on joint 3 is a deliberate choice in `kinematics.py`.
 
@@ -582,7 +584,7 @@ joint, stopped the target.
 | the real arm reacts late although teleop runs fine | `run.sh lag` in its own terminal while you move: `commands 60 Hz` is our side (teleop adds ~35 ms, measured the same before and after the joint-limit changes), `arm N ms behind` is the robot side: about 1/kp of the follower (kp 2.0 = 0.5 s) plus its 0.3 rad/s cap. Raise kp / max_velocity / max_acceleration on the robot PC |
 | follower status `clamped` | teleop's margin is smaller than the follower's 2.9 deg: keep `limit_margin_deg` above 3 (default 5) |
 | teleop log `waiting for the measured joints ... on /joint_states` | the robot's joint states do not arrive (robot PC off, other `ROS_DOMAIN_ID`, other names): `ros2 topic echo /joint_states --once --field name` must list `arm_left_joint1..6` / `arm_right_joint1..6` |
-| constant `joint limit reached` warnings | the IK is pinned at a joint limit. Common: joint 3 at the 15 deg elbow bound when starting from zeros, joint 5 / 6 at +-89 / +-174 with `orientation:=true` (the hand turned further than the wrist can; turn back a little), the workspace box (`target clamped by ...`). See [5](#5-orientation-modes) and [12](#12-testing-without-hardware) |
+| constant `joint limit reached` warnings | the IK is pinned at a joint limit. Common: joint 3 at the 15 deg elbow bound when starting from zeros, joint 5 / 6 at +-89 / +-173 with `orientation:=true` (the hand turned further than the wrist can; turn back a little), the workspace box (`target clamped by ...`). See [5](#5-orientation-modes) and [12](#12-testing-without-hardware) |
 
 ## Known issues
 - No collision checking. Joints stop `limit_margin_deg` (5 deg) before their limits; pulling back from a limit moves the arm once the hand is back where the arm stopped (`limit_follow:=true`: at once, with the swing described above).

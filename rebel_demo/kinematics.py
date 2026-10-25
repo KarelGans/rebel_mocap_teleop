@@ -24,15 +24,17 @@ JOINT_COLORS = [(0.90, 0.10, 0.10), (1.00, 0.55, 0.00), (0.95, 0.85, 0.10),
 
 # geometry: igus_rebel2_arm_macro.xacro (fixed motor joints merged).
 # Limits: the real ReBeL, as used by the robot PC's mocap follower (its URDF; 2026-10-21): joint 2 -79..139 deg,
-# joint 3 -79..139 deg, joint 5 +-94 deg, joints 1/4/6 +-179 deg (the Isaac rig model allows 1 deg more on 2, 3, 5).
+# joint 3 -79..139 deg, joint 5 +-94 deg, joints 1/4/6 +-178 deg (the Isaac rig model allows 1 deg more on every joint).
 # The follower clamps targets 0.05 rad (2.9 deg) inside these, so teleop's limit_margin_deg must be larger than that.
+# Limits = the robot's URDF / controller (fani8j/Igus_rebel, branch box-seam-detection): joints 1/4/6 +-178 deg
+# (were +-179 here: our soft limit then had only 1.1 deg spare to the follower's clamp, 178 - 2.9 deg).
 JOINTS = [
-    ((0, 0, 0.1462),     (0, 0, math.pi), (0, 0, 1),  -3.1241,  3.1241),   # joint1
+    ((0, 0, 0.1462),     (0, 0, math.pi), (0, 0, 1),  math.radians(-178.0), math.radians(178.0)),  # joint1
     ((0, 0.0265, 0.106),  (0, 0, 0),       (0, -1, 0), math.radians(-79.0), math.radians(139.0)),  # joint2
     ((0, -0.0265, 0.24152), (0, 0, 0),     (0, -1, 0), math.radians(15.0), math.radians(139.0)),  # joint3 (lower: elbow-up bound, not the robot's -79)
-    ((0.001345, 0, 0.157479), (0, 0, 0),   (0, 0, 1),  -3.12414, 3.12414), # joint4
+    ((0.001345, 0, 0.157479), (0, 0, 0),   (0, 0, 1),  math.radians(-178.0), math.radians(178.0)),  # joint4
     ((0, 0, 0.142),       (0, 0, 0),       (0, -1, 0), math.radians(-94.0), math.radians(94.0)),   # joint5
-    ((0, 0, 0.0768),      (0, 0, 0),       (0, 0, 1),  -3.12414, 3.12414), # joint6
+    ((0, 0, 0.0768),      (0, 0, 0),       (0, 0, 1),  math.radians(-178.0), math.radians(178.0)),  # joint6
 ]
 
 LOWER = np.array([j[3] for j in JOINTS])

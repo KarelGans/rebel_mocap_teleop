@@ -48,7 +48,7 @@ Parameters (defaults in brackets)
                           (the launch file gives each teleop node its own topic and joint_merger forwards them)
   publish_joint_states [false]   true = also publish /joint_states (stand-alone testing; the launch uses joint_merger)
   feedback_from_joint_states [false]  true = seed IK from Isaac's joint states instead of last command
-  limit_margin_deg [5]    never publish a joint closer than this to its limit (joints 1/4/6 stop at +-174 deg, joints 2/3
+  limit_margin_deg [5]    never publish a joint closer than this to its limit (joints 1/4/6 stop at +-173 deg, joints 2/3
                           at -74..134, joint 5 at +-89): the robot PC's mocap follower clamps 2.9 deg inside the limits, so
                           everything we send stays followable. The IK uses the same range. 0 = use the full range
   limit_follow [false]    true = at a joint limit (or the workspace box), forget the hand motion / rotation the arm

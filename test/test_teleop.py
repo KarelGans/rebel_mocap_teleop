@@ -44,8 +44,8 @@ def test_analytic_jacobian():
 def test_real_rebel_limits():
     """The real ReBeL's limits as used by the robot PC's mocap follower (2026-10-21)."""
     deg = np.degrees
-    assert np.allclose(deg(UPPER), [179, 139, 139, 179, 94, 179], atol=0.01)
-    assert np.allclose(deg(HW_LOWER), [-179, -79, -79, -179, -94, -179], atol=0.01)
+    assert np.allclose(deg(UPPER), [178, 139, 139, 178, 94, 178], atol=0.01)
+    assert np.allclose(deg(HW_LOWER), [-178, -79, -79, -178, -94, -178], atol=0.01)
     assert math.isclose(deg(LOWER[2]), 15.0)                               # the IK's elbow-up bound on joint 3
 
 
@@ -248,9 +248,9 @@ def test_lead_limit_keeps_slow_follower_close():
 def test_soft_limits_values():
     ik_lo, ik_hi, out_lo, out_hi = soft_limits(10.0)
     deg = np.degrees
-    assert np.allclose(deg(ik_hi), [169, 129, 129, 169, 84, 169], atol=0.01)
-    assert np.allclose(deg(ik_lo), [-169, -69, 15, -169, -84, -169], atol=0.01)       # joint 3 keeps the elbow-up bound
-    assert np.allclose(deg(out_lo), [-169, -69, -69, -169, -84, -169], atol=0.01)     # outputs: hardware limits - margin
+    assert np.allclose(deg(ik_hi), [168, 129, 129, 168, 84, 168], atol=0.01)
+    assert np.allclose(deg(ik_lo), [-168, -69, 15, -168, -84, -168], atol=0.01)       # joint 3 keeps the elbow-up bound
+    assert np.allclose(deg(out_lo), [-168, -69, -69, -168, -84, -168], atol=0.01)     # outputs: hardware limits - margin
     lo0, hi0, _, _ = soft_limits(0.0)
     assert np.allclose(lo0, LOWER) and np.allclose(hi0, UPPER)                          # 0 = the old behaviour
 
@@ -296,14 +296,14 @@ def test_full_pose_teleop_loop_stays_inside_the_margin():
         q_cmd = np.clip(q_cmd + dq, np.minimum(out_lo, q_cmd), np.maximum(out_hi, q_cmd))
         worst = max(worst, float(np.max(np.abs(np.degrees(q_cmd[[3, 5]])))))
         assert np.all(q_cmd >= out_lo - 1e-9) and np.all(q_cmd <= out_hi + 1e-9)
-    assert worst <= math.degrees(out_hi[3]) + 1e-6 < 169.01                # +-169 deg, not the +-179 deg hard limit
+    assert worst <= math.degrees(out_hi[3]) + 1e-6 < 168.01                # +-168 deg, not the +-178 deg hard limit
 
 
 def test_default_margin_stays_inside_the_follower_clamp():
     """Default limit_margin_deg = 5: everything published is >= 2 deg inside the follower's clamp (limits - 0.05 rad)."""
     ik_lo, ik_hi, out_lo, out_hi = soft_limits(5.0)
-    assert np.allclose(np.degrees(out_hi), [174, 134, 134, 174, 89, 174], atol=0.01)
-    assert np.allclose(np.degrees(out_lo), [-174, -74, -74, -174, -89, -174], atol=0.01)
+    assert np.allclose(np.degrees(out_hi), [173, 134, 134, 173, 89, 173], atol=0.01)
+    assert np.allclose(np.degrees(out_lo), [-173, -74, -74, -173, -89, -173], atol=0.01)
     assert np.allclose(np.degrees(ik_lo)[2], 15.0)                                       # elbow-up bound unchanged
     clamp_lo, clamp_hi = HW_LOWER + 0.05, UPPER - 0.05
     spare = math.radians(2.0)
@@ -433,7 +433,7 @@ def test_ik_priority_keeps_the_position_at_a_wrist_limit():
     T = fk(q0)
     T[:3, :3] = rot(T[:3, 2], math.radians(30)) @ T[:3, :3]
     q, pe, re = ik_priority(T, q0, lo, hi)
-    assert q[5] == pytest.approx(hi[5]) and pe < 1e-4 and re == pytest.approx(26.0, abs=0.5)
+    assert q[5] == pytest.approx(hi[5]) and pe < 1e-4 and re == pytest.approx(27.0, abs=0.5)   # 170 + 30 - 173
     assert np.degrees(np.abs(q - q0)[:5]).max() < 0.5
 
 
@@ -500,7 +500,7 @@ def test_full_pose_hand_turning_past_a_limit():
         back, off, _, _, _ = _replay_full_pose(axis, 300)
         assert off < 0.005 and back < 0.25
     _, _, qmin, qmax, _ = _replay_full_pose(ref[:3, 2], 300)                  # twist past joint 6: only joint 6 moves
-    assert np.all((qmax - qmin)[:5] < 1.0) and qmax[5] == pytest.approx(174.0, abs=0.1)
+    assert np.all((qmax - qmin)[:5] < 1.0) and qmax[5] == pytest.approx(173.0, abs=0.1)
 
 
 def test_rot_axis_sign_reverses_the_roll_only():
