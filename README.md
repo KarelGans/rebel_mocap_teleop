@@ -173,8 +173,9 @@ ros2 launch rebel_demo teleop.launch.py target:=isaac rig:=both rviz:=false scal
   the pose you want: add `skip_home:=true`.
 - Joint limits: teleop stays `limit_margin_deg` (5 deg) inside the real ReBeL limits, at least 2 deg inside where the follower
   clamps (its limits - 2.9 deg), so the follower never shows `clamped`. At a limit the arm slides along it to the closest
-  pose and comes back once your hand is back where the arm stopped (`limit_follow:=false`, also in `run.sh real`: a quick
-  flick past a limit then never swings the arm past its start).
+  pose; the hand motion past the limit is forgotten gradually (`limit_follow`, `limit_leak_speed` 0.2 m/s), so pulling back
+  moves the arm at once, and a quick flick past a limit does not swing the arm past its start. The forgotten part fades back
+  out afterwards (`limit_return_speed`), so the arm ends where your hand is.
 - `robot_ypr` turns the robot frame to match how you stand ([2.5](#25-align-the-robot-with-how-you-stand)).
 - Keep the whole command on one logical line (`\` at the line ends) and quote values that contain spaces.
 - Single arm: add `rig:=left` (uses `left_hand_frame` / `left_gripper_frame`) or `rig:=right` (uses `right_*`), e.g.
@@ -306,8 +307,9 @@ One window instead of the driver, teleop, keyboard and calibrate terminals (need
 | max_lead_deg | 0 (off) | the command is never more than this many degrees ahead of the measured joints (per joint), and homing waits for the robot. Real robot: below the follower's catch-up threshold (0.5 rad = 29 deg), e.g. 20. So the deadman can be pressed at any time: with it released the arm stands still and the command waits 20 deg from it, so pressing it finds at most 0.35 rad error (no REFUSED, no catch-up). Measured joints missing or older than `feedback_timeout` (0.5 s): the command **holds** until they return, then moves back within the limit at the joint speed limit (never one big step) |
 | workspace_min, workspace_max | `-0.7 -0.7 -0.45`, `0.7 0.7 0.95` | clamp of the tool target in the arm base frame (m), widened to include the pose at engage |
 | limit_margin_deg | 5 | never publish a joint closer than this (deg) to its limit: joints 1/4/6 stay within +-173, joints 2 and 3 within -74..134 (joint 3 also keeps its 15 deg elbow bound in the IK), joint 5 within +-89. Keep it above 3: the robot's follower clamps 2.9 deg inside the limits. The IK uses the same range; `0` = the full range |
-| limit_follow | false | `true`: at a joint limit (or the workspace box), forget the hand motion / rotation the arm cannot follow, so pulling back moves the arm at once (0.17 s instead of 1.5 s). The forgotten part swings the arm past its start when the hand comes back (13-22 cm after a quick flick in replays) before it fades out at `limit_return_speed`, so it is off by default; with `false` the arm only ever goes where your hand puts it, and sliding along a limit still follows at once |
-| limit_return_speed | 0.2 | with `limit_follow`: m/s at which the forgotten hand motion fades back out whenever the hand is not pushing further past the limit, so the arm ends where the hand is (`0` keeps it: up to 35 cm off in replays); rotation: node parameter `limit_return_deg` (60) |
+| limit_follow | true | at a joint limit (or the workspace box), forget the hand motion / rotation the arm cannot follow, so pulling back moves the arm at once (about 0.1-0.2 s) instead of waiting until your hand is back where the arm stopped (`false`: 0.4-1.3 s in replays; the arm only ever goes where your hand puts it) |
+| limit_leak_speed | 0.2 | with `limit_follow`: forget at most this fast (m/s; rotation: node parameter `limit_leak_deg`, 60). A quick flick past a limit forgets almost nothing, so the arm does not swing past its start; a hand that stays past the limit is forgotten within a moment. `0` = forget everything at once (swung the arm up to 22 cm past its start after flicks) |
+| limit_return_speed | 0.2 | with `limit_follow`: m/s at which the forgotten hand motion fades back out whenever the hand is not pushing further past the limit, so the arm ends where your hand is (`0` keeps it: up to 35 cm off in replays); rotation: node parameter `limit_return_deg` (60) |
 | limit_warn_mm | 5 | with `limit_follow:=false`: warn `joint limit reached` when the IK is this far (mm) off the target with a joint at a limit (with `limit_follow` the warning comes as soon as a limit holds the arm back) |
 | home_deg | `0 0 60 0 50 0` | start pose of every arm, 6 angles in degrees; checked against the joint limits at start. Not all zeros: straight up is below the 15 deg elbow-up bound, so the first IK step would jump joint 3 |
 | skip_home | false | no start-up move; start from the measured joints (zeros if none arrive); `engage` works at once |
@@ -333,8 +335,9 @@ Node-only parameters (set with `--ros-args -p`): teleop `rate_hz` 60,
 4. Clutch mapping: target = pose at engage + `scale_trans` x (hand now - hand at engage) (with `orientation:=true` also rotated
    by `scale_rot` x the hand's rotation since engage); clamped to the workspace box, which is widened to include the pose at
    engage so engaging never moves the arm. At a joint limit or the box the IK goes to the closest reachable pose, so the
-   arm slides along the limit. Optional **keep following** (`limit_follow:=true`): the part of the hand motion it cannot follow
-   is dropped from the mapping (pulling back then moves the arm at once) and fades back out at `limit_return_speed`.
+   arm slides along the limit. **Keep following** (`limit_follow`, default): the part of the hand motion it cannot follow is
+   dropped from the mapping at most `limit_leak_speed` fast (pulling back then moves the arm at once, quick flicks forget
+   almost nothing) and fades back out at `limit_return_speed`, so the arm ends where the hand is.
 5. IK: damped least squares with the analytic Jacobian (~3 ms), warm-started from the last command. A joint that would cross
    a limit is pinned at it and the rest re-solved, so an unreachable target gives the closest reachable pose. Position only
    unless `orientation:=true` (then: task-priority IK, position first, [5](#5-orientation-modes)); the free wrist is pulled
@@ -371,7 +374,7 @@ is a rotation about the vertical axis, so swinging the hand sideways also turns 
 
 Two differences: at a joint limit the rotation is left short and **not** handed to the other joints (robot_remote
 re-solves it with them, which made joints 4 / 5 travel up to 100 deg and, past a limit, the tool wander 0.7 m in our
-replay); and with `limit_follow:=true` the hand rotation past the limit is forgotten like the position, so the wrist turns back
+replay); and `limit_follow` (default) forgets the hand rotation past the limit like the position, so the wrist turns back
 as soon as your hand does (robot_remote: re-grip). Before 2026-10-21 `true` used a weighted IK that gave up position for
 rotation at a limit: on the real robot the arm moved 0.8 m while the hand moved 3-25 cm, and the wrist flipped
 (joint 5 through 0, joints 4 / 6 shifted by about 180 deg: ~2 rad sent where ~-1 rad was expected).
@@ -537,7 +540,7 @@ joint limit reached: arm_left_joint3 at lower elbow-up bound 15 deg - hand motio
 joint limits: target back in range          (when the arm leaves the limit)
 target clamped by workspace_min z = -0.45 m (hand is 5.0 cm beyond) - raise the limit if the arm can go there
 ```
-The first appears when a joint limit holds the arm back (the arm slides along the limit to the closest pose; with `limit_follow:=true` the
+The first appears when a joint limit holds the arm back (the arm slides along the limit to the closest pose; with `limit_follow` the
 hand motion beyond is forgotten, so it follows again as soon as the hand moves another way); the last means the workspace box, not a
 joint, stopped the target.
 
@@ -580,14 +583,14 @@ joint, stopped the target.
 | `No package metadata was found for rebel_demo` | broken install from a failed build: `rm -rf build/rebel_demo install/rebel_demo`, rebuild |
 | `run.sh`: Permission denied | `chmod +x scripts/run.sh` once |
 | **Limits** | |
-| real arm stops at a joint limit and holds although the hand moves (teleop keeps sending the same joints) | your hand is still past the limit: the arm moves again once the hand is back where the arm stopped (sideways along the limit it follows at once). `limit_follow:=true` makes pulling back respond at once, at the cost of the arm swinging past its start afterwards. If it still holds, ask the follower why: `ros2 topic echo /mocap_follower_left/status --once` (reason: clamped, catch-up, HOLD, ...) |
+| real arm stops at a joint limit and holds although the hand moves (teleop keeps sending the same joints) | with `limit_follow` (default) the hand motion past the limit is forgotten within a moment, so pulling back moves the arm at once; right after a quick push it may still wait a few tenths of a second. With `limit_follow:=false` the arm waits until your hand is back where it stopped. Sideways along the limit it follows at once either way. If it still holds, ask the follower why: `ros2 topic echo /mocap_follower_left/status --once` (reason: clamped, catch-up, HOLD, ...) |
 | the real arm reacts late although teleop runs fine | `run.sh lag` in its own terminal while you move: `commands 60 Hz` is our side (teleop adds ~35 ms, measured the same before and after the joint-limit changes), `arm N ms behind` is the robot side: about 1/kp of the follower (kp 2.0 = 0.5 s) plus its 0.3 rad/s cap. Raise kp / max_velocity / max_acceleration on the robot PC |
 | follower status `clamped` | teleop's margin is smaller than the follower's 2.9 deg: keep `limit_margin_deg` above 3 (default 5) |
 | teleop log `waiting for the measured joints ... on /joint_states` | the robot's joint states do not arrive (robot PC off, other `ROS_DOMAIN_ID`, other names): `ros2 topic echo /joint_states --once --field name` must list `arm_left_joint1..6` / `arm_right_joint1..6` |
 | constant `joint limit reached` warnings | the IK is pinned at a joint limit. Common: joint 3 at the 15 deg elbow bound when starting from zeros, joint 5 / 6 at +-89 / +-173 with `orientation:=true` (the hand turned further than the wrist can; turn back a little), the workspace box (`target clamped by ...`). See [5](#5-orientation-modes) and [12](#12-testing-without-hardware) |
 
 ## Known issues
-- No collision checking. Joints stop `limit_margin_deg` (5 deg) before their limits; pulling back from a limit moves the arm once the hand is back where the arm stopped (`limit_follow:=true`: at once, with the swing described above).
+- No collision checking. Joints stop `limit_margin_deg` (5 deg) before their limits; pulling back from a limit moves the arm at once (`limit_follow`; with `limit_follow:=false` only once the hand is back where the arm stopped).
 - `orientation:=true` at a wrist limit: the rotation stops for that cycle as a whole, so a tilt you make while still turning
   past the limit is not followed; turn back a little and it is.
 - IK targets `tool0`, not the point between the XEG jaws; with `orientation:=true` the fingertips swing.

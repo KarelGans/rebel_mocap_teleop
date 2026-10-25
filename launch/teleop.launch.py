@@ -128,6 +128,7 @@ def setup(context):
                               "skip_home": a("skip_home").lower() == "true",
                               "limit_margin_deg": float(a("limit_margin_deg")),
                               "limit_return_speed": float(a("limit_return_speed")),
+                              "limit_leak_speed": float(a("limit_leak_speed")),
                               "markers_detail": a("markers_detail").lower() == "true",
                               "home_deg": a("home_deg"),
                               "limit_warn_mm": float(a("limit_warn_mm")),
@@ -224,10 +225,12 @@ def generate_launch_description():
         D("limit_margin_deg", default_value="5",
           description="never publish a joint closer than this [deg] to its limit; must be larger than the real robot's "
                       "follower margin (2.9 deg) so it never clamps what we send (0 = full range)"),
-        D("limit_follow", default_value="false",
-          description="true = at a joint limit, forget the hand motion the arm cannot follow, so pulling back moves the arm "
-                      "at once; the forgotten part fades out at limit_return_speed but swings the arm past its start first "
-                      "(13-22 cm after a quick flick). false = the arm only ever goes where the hand puts it"),
+        D("limit_follow", default_value="true",
+          description="true = at a joint limit, forget the hand motion the arm cannot follow (at most limit_leak_speed), so "
+                      "pulling back moves the arm at once; the forgotten part fades back out at limit_return_speed, so the arm "
+                      "ends where the hand is. false = wait until the hand is back where the arm stopped"),
+        D("limit_leak_speed", default_value="0.2",
+          description="limit_follow: m/s at which hand motion past a limit is forgotten (0 = all at once)"),
         D("limit_return_speed", default_value="0.2",
           description="limit_follow: m/s at which the forgotten hand motion fades back out (0 = keep the offset)"),
         D("robot_joint_states_topic", default_value="",

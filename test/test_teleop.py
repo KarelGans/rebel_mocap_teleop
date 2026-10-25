@@ -354,7 +354,7 @@ def test_keep_following_after_a_limit():
     assert _replay(follow=True) < 0.25                 # new: comes back at once (the rest is the joint speed limit)
 
 
-def _limit_follow_replay(hand_of_t, seconds, return_speed):
+def _limit_follow_replay(hand_of_t, seconds, return_speed, leak_speed=0.0):
     """teleop's position cycle with limit_follow on (tool rate limit, workspace box, drop at a limit, and the fade of the
     dropped part whenever it did not grow this cycle). Returns the tool positions relative to the start [m]."""
     from rebel_demo.kinematics import toward_point
@@ -374,7 +374,10 @@ def _limit_follow_replay(hand_of_t, seconds, return_speed):
         before = float(np.linalg.norm(hand_ref - anchor0))
         if (limits_hit(q_ik, ik_lo, ik_hi) and pe > 0.002) or np.any(np.abs(wanted - np.clip(wanted, ws_lo, ws_hi)) > 1e-3):
             reached = fk(q_ik)[:3, 3]
-            hand_ref, target = drop_unreachable(hand_ref, wanted, reached, 1.0), reached.copy()
+            if leak_speed > 0:                                # forget at most leak_speed (limit_leak_speed)
+                hand_ref = toward_point(hand_ref, drop_unreachable(hand_ref, wanted, reached, 1.0), leak_speed * dt)
+            else:
+                hand_ref, target = drop_unreachable(hand_ref, wanted, reached, 1.0), reached.copy()
         if return_speed > 0 and float(np.linalg.norm(hand_ref - anchor0)) <= before + 1e-9:
             hand_ref = toward_point(hand_ref, anchor0, return_speed * dt)
         dq = q_ik - q_cmd
@@ -395,6 +398,23 @@ def test_limit_follow_offset_fades_back():
     assert np.linalg.norm(_limit_follow_replay(push, 9.0, 0.0)[-1]) > 0.2
     assert np.linalg.norm(_limit_follow_replay(flick, 8.0, 0.2)[-1]) < 0.01
     assert np.linalg.norm(_limit_follow_replay(push, 9.0, 0.2)[-1]) < 0.01
+
+
+def test_limit_follow_leak_no_swing_and_fast_pull_back():
+    """limit_leak_speed 0.2 + limit_return_speed 0.2 (the defaults): a quick flick past the reach does not swing the arm
+    past its start (forgetting everything at once swung it 22 cm), and after pushing past the reach and holding there,
+    pulling back moves the arm within 0.3 s (limit_follow off waited 0.4 s) and it ends where the hand is."""
+    dt = 1 / 60
+    ramp = lambda t, a, b: min(max((t - a) / (b - a), 0.0), 1.0)                             # noqa: E731
+    flick = lambda t: np.array([0.6 * (ramp(t, 0, 0.25) - ramp(t, 0.25, 0.5)), 0.0, 0.0])   # noqa: E731
+    hold = lambda t: np.array([0.4 * (ramp(t, 0, 0.8) - ramp(t, 2.8, 3.6)), 0.0, 0.0])      # noqa: E731
+    assert _limit_follow_replay(flick, 8.0, 0.2, 0.0)[:, 0].min() < -0.15                   # all at once: big swing
+    tool = _limit_follow_replay(flick, 8.0, 0.2, 0.2)
+    assert tool[:, 0].min() > -0.01 and np.linalg.norm(tool[-1]) < 0.01
+    tool = _limit_follow_replay(hold, 8.0, 0.2, 0.2)
+    turn = int(2.8 / dt)
+    react = next(i for i in range(turn, len(tool)) if abs(tool[i, 0] - tool[turn, 0]) > 0.005)
+    assert (react - turn) * dt < 0.3 and np.linalg.norm(tool[-1]) < 0.01
 
 
 # ---------------------------------------------------------------- orientation:=true: robot_remote's method

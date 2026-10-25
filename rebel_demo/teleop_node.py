@@ -51,14 +51,17 @@ Parameters (defaults in brackets)
   limit_margin_deg [5]    never publish a joint closer than this to its limit (joints 1/4/6 stop at +-173 deg, joints 2/3
                           at -74..134, joint 5 at +-89): the robot PC's mocap follower clamps 2.9 deg inside the limits, so
                           everything we send stays followable. The IK uses the same range. 0 = use the full range
-  limit_follow [false]    true = at a joint limit (or the workspace box), forget the hand motion / rotation the arm
-                          cannot follow, so pulling back moves the arm at once (0.17 s instead of 1.5 s). The forgotten
-                          part makes the arm swing past its start when the hand comes back (13-22 cm after a quick flick
-                          in replays), so it is off by default: the arm then never goes where the hand did not put it,
-                          and sliding along a limit still follows at once (the IK takes the closest reachable pose)
-  limit_return_speed [0.2]  limit_return_deg [60]   with limit_follow: m/s and deg/s at which the forgotten part fades
-                          back out whenever the hand is not pushing further past the limit, so the arm ends where the
-                          hand is (0 = keep it: up to 35 cm off in replays)
+  limit_follow [true]     at a joint limit (or the workspace box), forget the hand motion / rotation the arm cannot
+                          follow, so pulling back moves the arm at once instead of waiting until the hand is back where
+                          the arm stopped (false: wait; the arm only ever goes where the hand puts it)
+  limit_leak_speed [0.2]  limit_leak_deg [60]   with limit_follow: forget at most this fast (m/s, deg/s). A quick flick
+                          past a limit then forgets almost nothing, a hand that stays past the limit is forgotten within
+                          a moment. 0 = forget everything at once (the arm swung up to 22 cm past its start after flicks)
+  limit_return_speed [0.2]  limit_return_deg [60]   with limit_follow: the forgotten part fades back out at this speed
+                          whenever the hand is not pushing further past the limit, so the arm ends where the hand is.
+                          Replays, leak 0.2 + return 0.2: flick past the reach and back - no swing; push past the reach,
+                          hold, pull back - the arm reacts in 0.13 s (0.4-1.3 s with limit_follow false) and ends at
+                          the start; 0 = keep the forgotten part (up to 35 cm off)
   limit_warn_mm [5]       warn "joint limit reached" when the IK is further than this from the target and a joint
                           sits at a limit (the elbow-up bound counts); also warns when the workspace box clamps the target
   reanchor_after [2.0]    s of lost tracking before the clutch re-anchors (shorter gaps: hold, keep the anchor)
@@ -195,11 +198,14 @@ class Teleop(Node):
         self.fb_timeout = float(d("feedback_timeout", 0.5).value)
         self.home = parse_pose_deg(d("home_deg", "0 0 60 0 50 0").value)    # HOME [rad]; raises on bad input
         self.margin_deg = float(d("limit_margin_deg", 5.0).value)
-        self.limit_follow = bool(d("limit_follow", False).value)
+        self.limit_follow = bool(d("limit_follow", True).value)
         # limit_follow: the hand motion dropped at a limit fades back out at this speed once the arm is clear of its
         # limits again, so a quick flick past a limit does not leave the arm offset from the hand for good
         self.return_speed = float(d("limit_return_speed", 0.2).value)               # m/s (tool), 0 = keep the offset
         self.return_rot = math.radians(float(d("limit_return_deg", 60.0).value))    # deg/s (tool rotation)
+        # limit_follow: the hand motion past a limit is forgotten at most this fast (0 = all at once)
+        self.leak_speed = float(d("limit_leak_speed", 0.2).value)                   # m/s (tool)
+        self.leak_rot = math.radians(float(d("limit_leak_deg", 60.0).value))        # deg/s (tool rotation)
         self.markers = bool(d("markers", True).value)                    # RViz ~/markers: hand vs robot
         self.markers_detail = bool(d("markers_detail", False).value)     # + IK target and command spheres
         self.require_js = bool(d("require_joint_states", False).value)
@@ -501,17 +507,26 @@ class Teleop(Node):
         off_p = float(np.linalg.norm(self.hand_ref[0] - self.anchor0[0]))            # dropped so far (hand space)
         off_r = float(np.linalg.norm(_log_so3(self.hand_ref[1] @ self.anchor0[1].T)))
         if self.limit_follow and self.scale_trans > 0 and (pos_blocked or np.any(np.abs(beyond) > 1e-3)):
-            # keep following: the hand motion past the limit (or the workspace box) is forgotten, so the target stays at
-            # the closest reachable point and the arm follows at once when the hand moves any other way
+            # keep following: the hand motion past the limit (or the workspace box) is forgotten - at most
+            # limit_leak_speed per second, so a quick flick past the limit forgets almost nothing (the arm does not
+            # swing past its start afterwards) while a hand that stays past the limit is forgotten within a moment
+            # (pulling back then moves the arm at once). 0 = forget everything at once.
             reached = fk(q_ik)[:3, 3]
-            self.hand_ref = (drop_unreachable(self.hand_ref[0], wanted, reached, self.scale_trans), self.hand_ref[1])
-            self.target = reached.copy()
+            ref_p = drop_unreachable(self.hand_ref[0], wanted, reached, self.scale_trans)
+            if self.leak_speed > 0:
+                ref_p = toward_point(self.hand_ref[0], ref_p, self.leak_speed * self.dt / self.scale_trans)
+            else:
+                self.target = reached.copy()
+            self.hand_ref = (ref_p, self.hand_ref[1])
         if self.limit_follow and rot_blocked and self.scale_rot > 0:
-            # the same for the orientation: the hand rotation past the limit is forgotten, the wrist turns back at once
+            # the same for the orientation: the hand rotation past the limit is forgotten (at most limit_leak_deg/s)
             R_reached = fk(q_ik)[:3, :3]
-            self.hand_ref = (self.hand_ref[0], drop_unreachable_rot(R_f, R_reached, self.robot_ref[:3, :3],
-                                                                    self.scale_rot, self.rot_signs))
-            self.cmd_R = R_reached.copy()
+            ref_R = drop_unreachable_rot(R_f, R_reached, self.robot_ref[:3, :3], self.scale_rot, self.rot_signs)
+            if self.leak_rot > 0:
+                ref_R = toward_rot(self.hand_ref[1], ref_R, self.leak_rot * self.dt / self.scale_rot)
+            else:
+                self.cmd_R = R_reached.copy()
+            self.hand_ref = (self.hand_ref[0], ref_R)
         if self.limit_follow:
             # let the dropped hand motion fade back out (anchor -> the engage anchor) whenever the hand is not pushing
             # further past the limit this cycle, so the arm ends where the hand really is. Without it a flick past a

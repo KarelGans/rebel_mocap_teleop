@@ -89,8 +89,8 @@ def build_teleop_cmd(profile):
                 # never runs more than 20 deg ahead of the measured joints, so it never gets there
                 "max_lead_deg:=20",
                 "rot_axis_sign:=-1 1 1",   # orientation:=true on the real setup: the roll about x is reversed
-                # a quick hand flick past a joint limit must not leave the arm offset: never drop hand motion
-                "limit_follow:=false"]
+                # pulling back from a joint limit moves the arm at once; flicks forget little (limit_leak_speed)
+                "limit_follow:=true"]
     elif p["joint_states_topic"].strip():
         cmd.append(f"joint_states_topic:={p['joint_states_topic'].strip()}")
     if not p["mocap_bridge"]:

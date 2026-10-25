@@ -34,7 +34,7 @@ RUN_SH_REAL = {"target": "isaac", "rig": "both", "rviz": "false", "scale_trans":
                "workspace_max": "0.7 0.7 1.4", "robot_ypr": "1.5708 0 0", "home_deg": "0 0 60 0 50 0",
                "use_sim_time": "false", "fake_state": "true",
                "robot_joint_states_topic": "/joint_states", "require_joint_states": "true", "stale_timeout": "0.5",
-               "max_lead_deg": "20", "rot_axis_sign": "-1 1 1", "limit_follow": "false"}
+               "max_lead_deg": "20", "rot_axis_sign": "-1 1 1", "limit_follow": "true"}
 REAL_ONLY = ("use_sim_time", "fake_state", "robot_joint_states_topic", "require_joint_states", "stale_timeout",
              "max_lead_deg", "rot_axis_sign", "limit_follow")
 
