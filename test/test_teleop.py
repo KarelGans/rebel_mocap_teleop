@@ -419,6 +419,7 @@ def test_limit_follow_leak_no_swing_and_fast_pull_back():
 
 # ---------------------------------------------------------------- orientation:=true: robot_remote's method
 from rebel_demo.kinematics import (_log_so3, drop_unreachable_rot, flip_rotation, ik_priority, step_toward,  # noqa: E402
+                                   step_toward_roll_free,
                                    toward_point, toward_rot)
 
 HOME_REAL = np.radians([0, 0, 60, 0, 50, 0])
@@ -576,3 +577,24 @@ def test_markers_in_every_state():
     finally:
         node.destroy_node()
         rclpy.try_shutdown()
+
+
+def test_roll_free_step_keeps_the_translation_speed():
+    """A big joint-6 move (wrist flip) must not slow joints 1-5: they get their full step, joint 6 its own."""
+    max_dq = math.radians(15) / 60
+    q0 = np.radians([0, 10, 60, 0, 30, 0])
+    q_to = q0 + np.radians([2, 0, 0, 0, 0, 80])            # small shoulder move + large roll
+    q = step_toward_roll_free(q0, q_to, max_dq)
+    assert q[0] - q0[0] == pytest.approx(max_dq)           # joint 1: full step (step_toward: 2/80 of it)
+    assert q[5] - q0[5] == pytest.approx(max_dq)
+    old = step_toward(q0, q_to, max_dq)
+    assert old[0] - q0[0] == pytest.approx(max_dq * 2 / 80)
+
+
+def test_joint6_never_moves_the_tool_point():
+    rng = np.random.default_rng(3)
+    for _ in range(20):
+        q = rng.uniform(LOWER, UPPER)
+        q2 = q.copy()
+        q2[5] += rng.uniform(-3, 3)
+        assert np.allclose(fk(q)[:3, 3], fk(q2)[:3, 3], atol=1e-9)

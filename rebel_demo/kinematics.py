@@ -358,6 +358,11 @@ def step_toward(q_from, q_to, max_dq):
     m = float(np.max(np.abs(dq)))
     return q_from + (dq * (max_dq / m) if m > max_dq else dq)
 
+def step_toward_roll_free(q_from, q_to, max_dq):
+    """step_toward for joints 1-5 (scaled together) and joint 6 limited on its own. Joint 6's axis passes through tool0,
+    so it never moves the tool point: a fast joint-6 turn no longer slows the translation done by joints 1-5."""
+    q_from, q_to = np.asarray(q_from, float), np.asarray(q_to, float)
+    return np.append(step_toward(q_from[:5], q_to[:5], max_dq), q_from[5] + np.clip(q_to[5] - q_from[5], -max_dq, max_dq))
 
 def toward_point(p_from, p_to, max_dist):
     """p_from moved toward p_to by at most max_dist (rate limit; anti-windup lead clamp with p_from = the reached point)."""
