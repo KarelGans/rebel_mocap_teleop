@@ -102,7 +102,7 @@ from visualization_msgs.msg import Marker, MarkerArray
 
 from .kinematics import (JOINT_NAMES, LOWER, _log_so3, clamp_roll, drop_unreachable, drop_unreachable_rot, fk, flip_rotation, ik,
                          ik_priority, lead_step, limit_lead, limits_hit, parse_pose_deg, quat_to_matrix, scale_into_lead,
-                         scale_rotation, soft_limits, step_toward, toward_point, toward_rot, twist_about)
+                         scale_rotation, soft_limits, step_toward_roll_free, toward_point, toward_rot, twist_about)
 
 
 def matrix_to_quat(R):
@@ -544,13 +544,8 @@ class Teleop(Node):
         # 6. joint speed limit: scale ALL joints by the same factor so the step keeps the IK's direction and the tool
         # stays on its path (clipping each joint on its own bends the motion when one joint saturates)
         max_step = self.vmax * self.dt
-        if self.roll_follow:
-            # semi: joint 6 only rolls the tool about its own axis (no effect on the position) - limit it on its own, so a
-            # fast hand roll does not slow down the translation done by joints 1-5
-            q_next = np.append(step_toward(self.q_cmd[:5], q_ik[:5], max_step),
-                               self.q_cmd[5] + np.clip(q_ik[5] - self.q_cmd[5], -max_step, max_step))
-        else:
-            q_next = step_toward(self.q_cmd, q_ik, max_step)
+
+        q_next = step_toward_roll_free(self.q_cmd, q_ik, max_step)
         # never past the soft limits; a joint that already is beyond them (e.g. the measured start pose) may only move
         # back inside, at the speed limit - no jump
         lo, hi = np.minimum(self.out_lo, self.q_cmd), np.maximum(self.out_hi, self.q_cmd)
