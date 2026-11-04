@@ -41,10 +41,6 @@ export PATH
 
 # the shell setup scripts are not safe with 'set -u', so source them with it off
 source_ws() { [ -f "$1" ] && { set +u; source "$1"; return 0; } || { echo "run.sh: missing $1" >&2; return 1; }; }
-# A terminal that already sourced another workspace keeps it FIRST in AMENT_PREFIX_PATH (the setup hooks prepend
-# only new entries). robot_remote-main/igus_ws has its own igus_rebel_description (single arm, no dual_arm_rig xacro):
-# started from a terminal where that was sourced, the launch failed with "No such file ... dual_arm_rig_v2.urdf.xacro".
-unset AMENT_PREFIX_PATH COLCON_PREFIX_PATH
 source_ws /opt/ros/humble/setup.bash
 if [ -f "$MOCAP_WS/install/setup.bash" ]; then source_ws "$MOCAP_WS/install/setup.bash"
 else echo "run.sh: warning - $MOCAP_WS not found: mocap_tf will fail (mocap4r2_msgs)" >&2; fi
@@ -60,10 +56,10 @@ running_nodes() { ros2 node list --no-daemon --spin-time 2 2>/dev/null | grep -x
 
 case "$cmd" in
   real)
-    exec ros2 launch rebel_demo teleop.launch.py target:=isaac rig:=both rviz:=false scale_trans:=1.0 cutoff_hz:=6.0 \
+    exec ros2 launch rebel_demo teleop.launch.py target:=isaac rig:=both rviz:=false scale_trans:=1.0 cutoff_hz:=8.0 \
       left_hand_frame:=2 left_gripper_frame:=4 \
       right_hand_frame:=1 right_gripper_frame:=3 gripper_mode:=orientation \
-      orientation:=true max_joint_speed_deg:=45 workspace_max:="0.7 0.7 1.4" \
+      orientation:=true max_joint_speed_deg:=10 workspace_max:="0.7 0.7 1.4" \
       robot_ypr:="1.5708 0 0" home_deg:="0 0 60 0 50 0" stale_timeout:=0.5 \
       use_sim_time:=false fake_state:=true robot_joint_states_topic:=/joint_states require_joint_states:=true \
       max_lead_deg:=20 rot_axis_sign:="1 1 1" roll_sign:=1 limit_follow:=true "$@"
@@ -115,7 +111,6 @@ case "$cmd" in
     echo "ROS_DISTRO=${ROS_DISTRO:-?}  ROS_DOMAIN_ID=$ROS_DOMAIN_ID  RMW=${RMW_IMPLEMENTATION:-default}"
     printf 'rebel_demo     : '; ros2 pkg prefix rebel_demo || true
     printf 'mocap4r2_msgs  : '; ros2 pkg prefix mocap4r2_msgs || true
-    printf 'igus_rebel_description: '; ros2 pkg prefix igus_rebel_description || true   # must be dual_arm_control/install
     ;;
   *)
     echo "run.sh: unknown command '$cmd'" >&2; usage; exit 1
