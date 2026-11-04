@@ -142,16 +142,28 @@ ros2 topic hz /rigid_bodies                                              # ~120 
 ```bash
 R=~/dual_arm_control/src/rebel_mocap_teleop/scripts/run.sh
 
+# robot side first (this PC, ~/robot_remote-main); right arm shown, left: arms:=left / --arm left / rig:=left
+cd ~/robot_remote-main && source /opt/ros/humble/setup.bash && source igus_ws/install/setup.bash
+ros2 launch real_robot/dual_arm_driver.launch.py arms:=right gains:=farhan_eq   # terminal A: igus driver (CRI), motors on after ~6 s
+real_robot/run_mocap_follower.sh --arm right --mocap-domain 12                  # terminal B: follower; press e = enable (d disable, h home, q quit)
+
 $R driver                                              # terminal 1: OptiTrack driver, wait for "Configured!"
-$R activate                                            # terminal 2 (start only ONE driver)
-$R real rig:=left                                      # terminal 3: left arm, orientation:=true (rot_axis_sign "1 1 1")
-$R real rig:=left orientation:=semi roll_sign:=1       #   or: semi (joint 6 follows the twist, roll_sign 1)
-$R keyboard -p teleop:=/rebel_teleop                   # terminal 4: SPACE = engage / pause (rig:=left)
+$R activate                                            # terminal 2 (start only ONE driver; "inactive" = forgot this step)
+$R real rig:=right                                     # terminal 3: right arm, orientation:=true (rot_axis_sign "1 1 1")
+$R real rig:=right orientation:=semi roll_sign:=1      #   or: semi (joint 6 follows the twist, roll_sign 1)
+$R keyboard                                            # terminal 4: SPACE = engage / pause (finds /rebel_teleop itself)
 $R calibrate                                           # once, hand open
 ```
-Robot PC first: arm drivers + mocap follower running, follower enabled (`e`). Teleop waits for the robot's
-`/joint_states`, then moves to HOME; `robot is behind: ...` means the real arm is not following (follower disabled).
+Start one teleop launch only: a second `$R real` next to a running one leaves a zombie launch (same node names) that
+keeps publishing; Ctrl+C the old one first. Teleop waits for the robot's `/joint_states`, then moves to HOME;
+`robot is behind: ...` means the real arm is not following (follower disabled, or just slower than the command).
 Follower status: `ros2 topic echo /mocap_follower/status --once --full-length`.
+
+**JTC gains** (`gains:=` of `dual_arm_driver.launch.py`, profiles in `~/robot_remote-main/config/real_controller_gains.json`):
+`standard` = p 1.0 / ff 0.4 (the old default); `farhan` = p 3.0 / ff 0.6, the gains fani8j validated on the real left
+arm in `fani8j/Igus_rebel` branch `fani8j/jtc-tracking` (0 overshoot, settle 0.1-0.2 s) with that branch's driver
+(`jog_velocity_scale` 1.65); `farhan_eq` = the same loop transferred to our driver's fixed jog scale 2.0 (p 2.5 / ff 0.5),
+the one to try first. Check what the controller loaded: `grep -A2 "joint3:" /tmp/rebel_controllers_*.yaml`.
 
 ### 2.2 Real robot
 Teleop publishes the commands; on the robot PC the **mocap follower** (`mocap_follower_left` / `_right` with MoveIt Servo)
