@@ -24,19 +24,38 @@ Motive (Windows) --NatNet--> mocap4r2 OptiTrack driver --/rigid_bodies--> mocap_
 
 ## Quick start
 After the one-time [install](#1-install), `scripts/run.sh` does the sourcing (ROS, mocap workspace, this workspace,
-`ROS_DOMAIN_ID=11`; conda is taken off `PATH`) and runs the command, from any folder. One terminal per line, in order:
+`ROS_DOMAIN_ID=12`; conda is taken off `PATH`) and runs the command, from any folder.
 
-| Terminal | Command (prefix `~/dual_arm_control/src/rebel_mocap_teleop/scripts/`) | Notes |
+### Set up a new terminal (copy-paste)
+Paste this into every new terminal before the commands below. It also makes `ros2 topic echo`, `ros2 service call` etc.
+work by hand. Use a new terminal: not the robot driver's or the follower's (they source robot_remote-main's `igus_ws`,
+whose single-arm `igus_rebel_description` breaks the launch with `No such file ... dual_arm_rig_v2.urdf.xacro`).
+```bash
+conda deactivate 2>/dev/null                    # conda's python breaks colcon and rclpy
+unset AMENT_PREFIX_PATH COLCON_PREFIX_PATH      # forget workspaces sourced earlier in this terminal (igus_ws)
+export ROS_DOMAIN_ID=12 ROS_LOCALHOST_ONLY=0    # same domain as the mocap driver and the robot's mocap follower
+source /opt/ros/humble/setup.bash
+source ~/mocap_ws/install/setup.bash            # mocap workspace first
+source ~/dual_arm_control/install/setup.bash
+R=~/dual_arm_control/src/rebel_mocap_teleop/scripts/run.sh
+ros2 pkg prefix igus_rebel_description          # must print ~/dual_arm_control/install/igus_rebel_description
+```
+
+### Run (real robot, right arm)
+The OptiTrack driver is already running and active (otherwise: [2.1 Driver](#21-driver)), and on the robot side the
+driver and the mocap follower are running, the follower enabled (`e`) **before** terminal 1 starts.
+One terminal per line, in order:
+
+| Terminal | Command | Notes |
 |---|---|---|
-| 1 | `run.sh driver` | OptiTrack driver; wait for `Configured!`, then in any terminal `run.sh activate` |
-| 2 | `run.sh real` (real robot) or `run.sh isaac` (Isaac Sim) | wait for `at HOME` from both arms; keep it open |
-| 3 | `run.sh keyboard` | click this terminal to focus it; **SPACE** engages / pauses / resumes both arms, `l` / `r` one arm, `q` quits |
-| once | `run.sh calibrate` | hold both hands open while it runs; repeat after every restart of the launch |
+| 1 | `$R real rig:=right` | real robot, right arm; wait for `at HOME`; keep it open |
+| 2 | `$R keyboard` | click this terminal to focus it; **SPACE** engages / pauses / resumes the arm, `q` quits |
+| once | `$R calibrate` | hold the right hand open while it runs; repeat after every restart of terminal 1 |
 
-**Prefer a window?** `run.sh ui` replaces terminals 1-4 with one GUI ([2.7](#27-the-gui-runsh-ui)).
+**Prefer a window?** `run.sh ui` replaces these terminals with one GUI ([2.7](#27-the-gui-runsh-ui)).
 
 `run.sh help` lists everything (`build`, `env` check, ...). Extra arguments override the defaults:
-`run.sh real scale_trans:=0.5 max_joint_speed_deg:=15`; another domain: `ROS_DOMAIN_ID=12 run.sh real`. Optional alias for
+`run.sh real scale_trans:=0.5 max_joint_speed_deg:=15`; another domain: `ROS_DOMAIN_ID=11 run.sh real`. Optional alias for
 `~/.bashrc`: `alias rebel='~/dual_arm_control/src/rebel_mocap_teleop/scripts/run.sh'` (then `rebel real`, `rebel keyboard`).
 The robot side (Isaac Sim, or your driver that reads `/dual_arm/isaac_joint_commands`) must be running too.
 First run on a new robot or setup: `scale_trans:=0.5 max_joint_speed_deg:=15` and the e-stop in reach.
